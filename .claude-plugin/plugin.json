@@ -1,0 +1,11 @@
+{
+  "name": "powerups",
+  "version": "1.0.0",
+  "description": "Cross-platform developer skills — multi-agent review, domain search, git worktrees, and more",
+  "author": {
+    "name": "Matthew O'Riordan"
+  },
+  "repository": "https://github.com/mattheworiordan/powerups",
+  "license": "MIT",
+  "keywords": ["skills", "productivity", "worktree", "counsel", "domain-search"]
+}

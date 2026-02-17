@@ -1,0 +1,11 @@
+{
+  "name": "colony",
+  "version": "1.2.0",
+  "description": "Parallel task execution with independent verification — your AI swarm for serious software engineering",
+  "author": {
+    "name": "Matthew O'Riordan"
+  },
+  "repository": "https://github.com/mattheworiordan/powerups",
+  "license": "MIT",
+  "keywords": ["colony", "parallel", "tasks", "verification", "multi-agent", "swarm"]
+}

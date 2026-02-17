@@ -1,0 +1,23 @@
+# Task runner working directories
+.working/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.sublime-*
+
+# Logs
+*.log
+
+# Node
+node_modules/
+
+# Counsel config (user-specific)
+.counsel/

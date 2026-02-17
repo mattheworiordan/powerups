@@ -1,0 +1,38 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "powerups-marketplace",
+  "description": "Powerups for developers — coding, automation, and AI effectiveness",
+  "owner": {
+    "name": "Matthew O'Riordan"
+  },
+  "plugins": [
+    {
+      "name": "colony",
+      "description": "Parallel task execution with independent verification — your AI swarm for serious software engineering. Requires Claude Code.",
+      "version": "1.2.0",
+      "author": {
+        "name": "Matthew O'Riordan"
+      },
+      "source": "./plugins/colony/",
+      "category": "productivity",
+      "homepage": "https://github.com/mattheworiordan/powerups/tree/main/plugins/colony"
+    },
+    {
+      "name": "powerups",
+      "description": "Cross-platform developer skills — multi-agent review, domain search, git worktrees, and more",
+      "version": "1.0.0",
+      "author": {
+        "name": "Matthew O'Riordan"
+      },
+      "source": "./",
+      "category": "productivity",
+      "homepage": "https://github.com/mattheworiordan/powerups",
+      "skills": [
+        "./skills/counsel",
+        "./skills/domain-search",
+        "./skills/worktree",
+        "./skills/worktree-cleanup"
+      ]
+    }
+  ]
+}
