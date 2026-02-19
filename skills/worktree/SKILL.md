@@ -88,10 +88,18 @@ Store detected types (can be multiple, e.g., Rails + Node).
 
 ## Step 5: Identify Environment Files
 
+Find env files across the entire project, not just the root:
+
 ```bash
-# Find env files that need copying
-ls -la .env .env.local .env.development .env.example .env.sample 2>/dev/null
+# Find all env files recursively (untracked/gitignored files that need copying)
+find . -maxdepth 4 \( -name ".env" -o -name ".env.*" -o -name ".envrc" \) \
+  -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/.git-worktree/*" \
+  -not -path "*/.venv/*" -not -path "*/vendor/*" 2>/dev/null
 ```
+
+This catches both root-level files (`.env`, `.env.local`) and subdirectory files (`packages/api/.env`, `config/.envrc`, `apps/web/.env.local`).
+
+Store the full list of discovered files with their relative paths.
 
 ### Framework-Specific Conventions
 
@@ -103,7 +111,7 @@ Different frameworks have different conventions for env files:
 | **Rails/Django/Generic** | `.env` | `.env.example` | `.env` is gitignored |
 | **Docker Compose** | `.env` | `.env.example` | `.env` is gitignored |
 
-### Priority for copying
+### Priority for root-level files
 
 **For Next.js/Vite/Nuxt projects** (detected in Step 4):
 1. `.env` from source → copy as `.env.local` (the local secrets file convention)
@@ -116,6 +124,10 @@ Different frameworks have different conventions for env files:
 2. `.env.local` - if exists, copy as `.env.local`
 3. `.env.development` - if exists, copy as `.env.development`
 4. `.env.example` / `.env.sample` - copy as `.env` (ask if unclear)
+
+### Subdirectory files
+
+All env files found in subdirectories should be copied preserving their relative path. No framework-specific renaming is applied to subdirectory files — they are copied as-is to maintain the project's existing structure.
 
 **Edge cases**: Some frameworks use different patterns (Rails 7+ `config/credentials.yml.enc`, Phoenix `config/runtime.exs`, Serverless `samconfig.toml`). If you detect these, use your judgment on what to copy.
 
@@ -152,6 +164,8 @@ git worktree add -b "{branch-name}" ".git-worktree/{folder-name}" "$BASE_BRANCH"
 cd .git-worktree/{folder-name}
 ```
 
+### Root-level env files
+
 **For Next.js/Vite/Nuxt projects** (use `.env.local` convention):
 ```bash
 # Copy .env as .env.local (the local secrets file in these frameworks)
@@ -178,6 +192,23 @@ If only `.env.example` exists:
 ```bash
 cp ../../.env.example .env
 ```
+
+### Subdirectory env files
+
+For every env file found in a subdirectory during Step 5, copy it preserving its relative path:
+
+```bash
+# SOURCE_ROOT is the original project root (../../ relative to the worktree)
+SOURCE_ROOT="../.."
+
+# For each subdirectory env file discovered in Step 5 (excluding root-level ones already handled above)
+for f in $SUBDIR_ENV_FILES; do
+  mkdir -p "$(dirname "$f")"
+  cp "$SOURCE_ROOT/$f" "$f" 2>/dev/null
+done
+```
+
+For example, if Step 5 found `packages/api/.env` and `config/.envrc`, this creates the subdirectories and copies each file into the worktree at the same relative path.
 
 ## Step 8: Install Dependencies
 
@@ -226,8 +257,9 @@ go mod download
 Check that setup succeeded:
 
 ```bash
-# Verify env file exists
-[ -f ".env" ] || [ -f ".env.development" ] || [ -f ".env.local" ]
+# Verify at least one env file exists (root or subdirectory)
+find . -maxdepth 4 \( -name ".env" -o -name ".env.*" -o -name ".envrc" \) \
+  -not -path "*/node_modules/*" -not -path "*/.git/*" | head -1 | grep -q .
 
 # Verify dependencies installed (check for node_modules, vendor, etc.)
 [ -d "node_modules" ] || [ -d "vendor" ] || [ -d ".venv" ] || [ -d "target" ]
@@ -245,7 +277,7 @@ Worktree created successfully!
   Base:   main
 
 Setup completed:
-  ✓ Environment files copied (.env.local)   # Or .env depending on framework
+  ✓ Environment files copied (.env.local, packages/api/.env, config/.envrc)
   ✓ Dependencies installed (yarn)
 
 To start working:
@@ -254,7 +286,7 @@ To start working:
 Or open a new terminal/Claude session in that directory.
 ```
 
-Report the actual env file that was created (`.env.local` for Next.js/Vite/Nuxt, `.env` for others).
+Report all env files that were copied - both root-level and subdirectory files. List the actual paths so the user can verify nothing was missed.
 
 ## Error Handling
 
