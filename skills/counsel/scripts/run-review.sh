@@ -29,19 +29,21 @@ OUTPUT_DIR=""
 TIMEOUT=300  # 5 minutes default
 EXCLUDE_AGENT=""
 
+# Helper: assert that the current option has a value argument
+require_value() {
+  if [ $# -lt 2 ]; then
+    echo "Error: $1 requires a value" >&2
+    exit 1
+  fi
+}
+
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --config|--prompt-file|--output-dir|--timeout|--exclude)
-      if [ $# -lt 2 ]; then
-        echo "Error: $1 requires a value" >&2
-        exit 1
-      fi
-      ;;&
-    --config) CONFIG_FILE="$2"; shift 2 ;;
-    --prompt-file) PROMPT_FILE="$2"; shift 2 ;;
-    --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
-    --timeout) TIMEOUT="$2"; shift 2 ;;
-    --exclude) EXCLUDE_AGENT="$2"; shift 2 ;;
+    --config)      require_value "$@"; CONFIG_FILE="$2"; shift 2 ;;
+    --prompt-file) require_value "$@"; PROMPT_FILE="$2"; shift 2 ;;
+    --output-dir)  require_value "$@"; OUTPUT_DIR="$2"; shift 2 ;;
+    --timeout)     require_value "$@"; TIMEOUT="$2"; shift 2 ;;
+    --exclude)     require_value "$@"; EXCLUDE_AGENT="$2"; shift 2 ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
 done
@@ -84,10 +86,11 @@ run_agent() {
 
   case "$agent" in
     codex)
-      # codex review is purpose-built for code review — inherently read-only
-      # Note: codex review always reviews all uncommitted changes; it cannot be scoped
-      # to specific files or topics via a custom prompt
-      run_with_timeout codex review --uncommitted > "$output_file" 2> "$error_file" || true
+      # Use `codex exec` for custom prompt reviews (non-interactive, sandboxed).
+      # Falls back to `codex exec review` for code-only reviews when no prompt is given.
+      # --full-auto enables sandboxed auto-execution; prompt is passed via stdin to
+      # avoid shell quoting issues with large prompts.
+      run_with_timeout codex exec --full-auto - < "$PROMPT_FILE" > "$output_file" 2> "$error_file" || true
       ;;
     gemini)
       # -p for non-interactive mode; --allowed-mcp-server-names none disables MCP

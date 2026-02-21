@@ -189,7 +189,7 @@ All agents run read-only:
 
 | Agent | Invocation | Why It's Read-Only |
 |-------|-----------|-------------------|
-| Codex | `codex review --uncommitted` | Purpose-built review mode, inherently read-only. **Note**: reviews all uncommitted changes, cannot be scoped. |
+| Codex | `codex exec --full-auto - < prompt` | Non-interactive sandboxed execution. Prompt piped via stdin. `--full-auto` enables sandboxed auto-execution. |
 | Gemini | `gemini -p "prompt" --allowed-mcp-server-names none` | Non-interactive, MCP disabled, no auto-approval for tool calls. |
 | Claude Code | Task() sub-agent with read-only prompt | Prompt-based restriction. |
 
