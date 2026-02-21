@@ -95,8 +95,11 @@ run_agent() {
     gemini)
       # -p for non-interactive mode; --allowed-mcp-server-names none disables MCP
       # servers (prevents off-script context pollution); without --yolo, Gemini cannot
-      # auto-approve tool calls so it's effectively read-only
-      run_with_timeout gemini -p "$(< "$PROMPT_FILE")" --allowed-mcp-server-names none > "$output_file" 2> "$error_file" || true
+      # auto-approve tool calls so it's effectively read-only.
+      # --raw-output prevents output sanitization from truncating long responses.
+      # Prompt is piped via stdin and -p "" triggers headless mode — avoids shell
+      # ARG_MAX limits with large prompts.
+      run_with_timeout gemini -p "" --allowed-mcp-server-names none --raw-output --accept-raw-output-risk < "$PROMPT_FILE" > "$output_file" 2> "$error_file" || true
       ;;
     claude)
       # -p for non-interactive mode; prompt includes read-only instructions
