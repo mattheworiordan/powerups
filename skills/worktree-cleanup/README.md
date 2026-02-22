@@ -6,7 +6,7 @@
 
 ## Why Worktree Cleanup?
 
-After working with multiple worktrees, your `.git-worktree/` directory accumulates old branches. Cleanup shows you the status of each one — merged or not, uncommitted changes, age — and lets you selectively remove them.
+After working with multiple worktrees, your worktree directories accumulate old branches. Cleanup shows you the status of each one — merged or not, uncommitted changes, age — and lets you selectively remove them. Works with both `.git-worktree/` and `.claude/worktrees/` directories.
 
 - **Status overview** — See merged/unmerged status, uncommitted changes, last modified date
 - **Safe removal** — Warns before deleting unmerged branches or worktrees with uncommitted changes
@@ -41,12 +41,16 @@ Included with the powerups plugin:
 
 ### What It Does
 
-1. Lists all worktrees in `.git-worktree/` with status details
-2. Shows branch name, merge status, uncommitted changes, last modified date
+1. Detects worktree directories (`.git-worktree/` and/or `.claude/worktrees/`)
+2. Lists all worktrees with status details (branch, merge status, uncommitted changes, age)
 3. Asks which to remove (by number, "merged" for all merged, or "none")
 4. Requires explicit confirmation for worktrees with uncommitted changes or unmerged branches
 5. Removes selected worktrees and optionally deletes their branches
 6. Prunes stale git worktree references
+
+### Claude Code Native Worktrees
+
+Claude Code has built-in worktree support (`claude --worktree`) that stores worktrees at `.claude/worktrees/`. This cleanup skill automatically scans both `.git-worktree/` and `.claude/worktrees/`, so it works regardless of which approach you used to create worktrees.
 
 ---
 

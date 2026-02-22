@@ -1,7 +1,7 @@
 ---
 name: worktree-cleanup
 description: List and remove git worktrees interactively. Use when someone wants to clean up old worktrees, prune stale branches, or see worktree status.
-version: 1.0.0
+version: 1.1.0
 allowed-tools: Read, Bash, Grep, Glob, AskUserQuestion
 ---
 
@@ -9,28 +9,48 @@ allowed-tools: Read, Bash, Grep, Glob, AskUserQuestion
 
 Interactively list and remove git worktrees.
 
-## Step 1: List All Worktrees
+## Step 1: Detect Worktree Directory
+
+Determine which worktree directories exist:
 
 ```bash
-# Get all worktrees
-git worktree list
-
-# List contents of .git-worktree directory
-ls -la .git-worktree/ 2>/dev/null
+# Check both possible locations
+WORKTREE_DIRS=""
+if [ -d ".git-worktree" ]; then
+  WORKTREE_DIRS=".git-worktree"
+fi
+if [ -d ".claude/worktrees" ]; then
+  WORKTREE_DIRS="$WORKTREE_DIRS .claude/worktrees"
+fi
 ```
 
-## Step 2: Gather Worktree Details
+If both directories exist, scan both. If neither exists, report no worktrees found.
 
-For each worktree in `.git-worktree/`:
+## Step 2: List All Worktrees
+
+```bash
+# Get all worktrees (git's own tracking)
+git worktree list
+
+# List contents of each detected worktree directory
+for WORKTREE_DIR in $WORKTREE_DIRS; do
+  echo "=== $WORKTREE_DIR ==="
+  ls -la "$WORKTREE_DIR/" 2>/dev/null
+done
+```
+
+## Step 3: Gather Worktree Details
+
+For each worktree found in the detected directories:
 
 ```bash
 # Get the branch name
-cd .git-worktree/{name}
+cd "$WORKTREE_DIR/{name}"
 BRANCH=$(git branch --show-current)
 
 # Get last modified time
-stat -f "%Sm" -t "%Y-%m-%d" .git-worktree/{name} 2>/dev/null || \
-  stat -c "%y" .git-worktree/{name} 2>/dev/null | cut -d' ' -f1
+stat -f "%Sm" -t "%Y-%m-%d" "$WORKTREE_DIR/{name}" 2>/dev/null || \
+  stat -c "%y" "$WORKTREE_DIR/{name}" 2>/dev/null | cut -d' ' -f1
 
 # Check if branch is merged to main
 git branch --merged main | grep -q "{branch}" && echo "MERGED" || echo "NOT_MERGED"
@@ -39,40 +59,40 @@ git branch --merged main | grep -q "{branch}" && echo "MERGED" || echo "NOT_MERG
 git branch -r | grep -q "origin/{branch}" && echo "REMOTE" || echo "LOCAL_ONLY"
 
 # Check for uncommitted changes
-cd .git-worktree/{name}
+cd "$WORKTREE_DIR/{name}"
 git status --porcelain | head -5
 ```
 
-## Step 3: Present Interactive List
+## Step 4: Present Interactive List
 
-Format the output clearly:
+Format the output clearly, noting which directory each worktree is in:
 
 ```
-Found {N} worktrees in .git-worktree/:
+Found {N} worktrees:
 
-1. security-fixes
+1. security-fixes (in .git-worktree/)
    Branch: fix/security-fixes
    Last modified: 3 days ago
    Status: ✓ Merged to main
 
-2. dashboard-quick-wins
+2. dashboard-quick-wins (in .claude/worktrees/)
    Branch: feature/dashboard-quick-wins
    Last modified: 10 days ago
    Status: ⚠ NOT merged to main
    Changes: 2 uncommitted files
 
-3. v6-pricing-terminology
+3. v6-pricing-terminology (in .git-worktree/)
    Branch: feature/v6-pricing
    Last modified: 6 days ago
    Status: ✓ Merged to main
 
-4. worktree-safe-dev
+4. worktree-safe-dev (in .claude/worktrees/)
    Branch: feature/worktree-safe-dev
    Last modified: 3 days ago
    Status: ⚠ NOT merged to main
 ```
 
-## Step 4: Ask User Which to Remove
+## Step 5: Ask User Which to Remove
 
 Use AskUserQuestion with options:
 
@@ -89,7 +109,7 @@ Options:
 - If worktree has uncommitted changes: "⚠ Has uncommitted changes - will be lost!"
 - If branch not merged: "⚠ Branch not merged - work may be lost!"
 
-## Step 5: Confirm Dangerous Removals
+## Step 6: Confirm Dangerous Removals
 
 If user selects worktrees with uncommitted changes or unmerged branches:
 
@@ -102,13 +122,13 @@ If user selects worktrees with uncommitted changes or unmerged branches:
 Type "confirm" to proceed, or "cancel" to go back.
 ```
 
-## Step 6: Remove Selected Worktrees
+## Step 7: Remove Selected Worktrees
 
-For each selected worktree:
+For each selected worktree (using its detected `$WORKTREE_DIR`):
 
 ```bash
 # Remove the worktree
-git worktree remove .git-worktree/{name} --force
+git worktree remove "$WORKTREE_DIR/{name}" --force
 
 # Optionally delete the branch if merged
 git branch -d {branch-name} 2>/dev/null
@@ -122,14 +142,14 @@ Delete the branch anyway? [y/N]
 
 Use `git branch -D` (force) only if user confirms.
 
-## Step 7: Prune Stale References
+## Step 8: Prune Stale References
 
 ```bash
 # Clean up any stale worktree references
 git worktree prune
 ```
 
-## Step 8: Report Results
+## Step 9: Report Results
 
 ```
 Cleanup complete!
@@ -149,7 +169,7 @@ Remaining worktrees: 2
 
 **No worktrees found**:
 ```
-No worktrees found in .git-worktree/
+No worktrees found in .git-worktree/ or .claude/worktrees/
 
 Your working directory is clean. Use /worktree <name> to create one.
 ```
