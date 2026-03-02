@@ -30,6 +30,7 @@
       "skills": [
         "./skills/counsel",
         "./skills/domain-search",
+        "./skills/tldr",
         "./skills/worktree",
         "./skills/worktree-cleanup"
       ]

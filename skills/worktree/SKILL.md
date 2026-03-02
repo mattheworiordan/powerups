@@ -1,8 +1,8 @@
 ---
 name: worktree
 description: Create a git worktree with proper setup (branch, env, dependencies). Use when someone wants to work on a feature/fix in isolation without switching branches.
-version: 1.1.0
-allowed-tools: Read, Bash, Grep, Glob, AskUserQuestion
+version: 1.2.0
+allowed-tools: Read, Bash, Grep, Glob
 ---
 
 # Create Git Worktree

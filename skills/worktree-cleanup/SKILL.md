@@ -1,8 +1,8 @@
 ---
 name: worktree-cleanup
 description: List and remove git worktrees interactively. Use when someone wants to clean up old worktrees, prune stale branches, or see worktree status.
-version: 1.1.0
-allowed-tools: Read, Bash, Grep, Glob, AskUserQuestion
+version: 1.2.0
+allowed-tools: Read, Bash, Grep, Glob
 ---
 
 # Git Worktree Cleanup
@@ -94,18 +94,16 @@ Found {N} worktrees:
 
 ## Step 5: Ask User Which to Remove
 
-Use AskUserQuestion with options:
+After presenting the list, ask:
 
 ```
-Which worktrees should I remove?
-
-Options:
-- Specific numbers (e.g., "1, 3")
-- "merged" - Remove all that are merged to main
-- "none" - Cancel, don't remove any
+Which worktrees should I remove? Reply with:
+- Numbers (e.g., "1, 3") to remove specific worktrees
+- "merged" to remove all that are merged to main
+- "none" to cancel
 ```
 
-**Important warnings to show**:
+**Important warnings to show alongside unmerged/dirty worktrees**:
 - If worktree has uncommitted changes: "⚠ Has uncommitted changes - will be lost!"
 - If branch not merged: "⚠ Branch not merged - work may be lost!"
 

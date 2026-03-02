@@ -15,6 +15,7 @@ npx skills add mattheworiordan/powerups
 # Install a specific skill
 npx skills add mattheworiordan/powerups --skill counsel
 npx skills add mattheworiordan/powerups --skill domain-search
+npx skills add mattheworiordan/powerups --skill tldr
 npx skills add mattheworiordan/powerups --skill worktree
 npx skills add mattheworiordan/powerups --skill worktree-cleanup
 ```
@@ -23,6 +24,7 @@ npx skills add mattheworiordan/powerups --skill worktree-cleanup
 |-------|-------------|------|
 | [**Counsel**](skills/counsel/) | Multi-agent code review — fans out to Codex, Gemini, OpenCode, and Claude Code in parallel, then synthesizes findings | [README](skills/counsel/README.md) |
 | [**Domain Search**](skills/domain-search/) | Domain name availability checking with RDAP/WHOIS verification and AI-generated alternatives | [README](skills/domain-search/README.md) |
+| [**TL;DR**](skills/tldr/) | Condense long AI-generated documents for sharing — acts as a critical first reader, surfaces issues, then creates a concise summary using the Pyramid Principle | [README](skills/tldr/README.md) |
 | [**Worktree**](skills/worktree/) | Git worktree creation with automatic branch naming, env files, and dependency installation | [README](skills/worktree/README.md) |
 | [**Worktree Cleanup**](skills/worktree-cleanup/) | Interactive listing and removal of git worktrees with safety checks | [README](skills/worktree-cleanup/README.md) |
 
@@ -83,6 +85,7 @@ powerups/
 ├── skills/                     # Cross-platform skills (Agent Skills standard)
 │   ├── counsel/                # Multi-agent review
 │   ├── domain-search/          # Domain availability checking
+│   ├── tldr/                   # Document condenser for sharing
 │   ├── worktree/               # Git worktree creation
 │   └── worktree-cleanup/       # Git worktree cleanup
 ├── plugins/                    # Claude Code plugins

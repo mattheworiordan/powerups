@@ -1,8 +1,8 @@
 ---
 name: counsel
 description: Multi-agent review using local coding agents (Codex, Gemini, Claude Code). Fan out review requests to multiple agents in parallel, then synthesize their findings. Use when you want a second (or third) opinion on code changes, plans, documents, or architecture decisions.
-version: 1.0.0
-allowed-tools: Read, Bash, Grep, Glob, Write, AskUserQuestion, Task
+version: 1.1.0
+allowed-tools: Read, Bash, Grep, Glob, Write, Task
 argument-hint: "[review topic or 'config']"
 ---
 
@@ -163,7 +163,14 @@ bash "$COUNSEL_DIR/scripts/detect-agents.sh"
 
 ### Step 2: Ask User Which to Enable
 
-Use AskUserQuestion with multiSelect to let the user choose from detected agents. Claude Code is always available as a sub-agent.
+List the detected agents and ask which to enable:
+
+```
+I detected the following agents: [list from Step 1]
+Claude Code (sub-agent) is always available.
+
+Which would you like to enable? Reply with the names, e.g. "codex, gemini" or "all".
+```
 
 ### Step 3: Save Config
 
