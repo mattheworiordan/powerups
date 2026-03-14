@@ -90,7 +90,9 @@ run_agent() {
       # Falls back to `codex exec review` for code-only reviews when no prompt is given.
       # --full-auto enables sandboxed auto-execution; prompt is passed via stdin to
       # avoid shell quoting issues with large prompts.
-      run_with_timeout codex exec --full-auto - < "$PROMPT_FILE" > "$output_file" 2> "$error_file" || true
+      # --skip-git-repo-check allows running in directories that aren't git repos
+      # (e.g. monorepo subdirectories, non-git projects).
+      run_with_timeout codex exec --full-auto --skip-git-repo-check - < "$PROMPT_FILE" > "$output_file" 2> "$error_file" || true
       ;;
     gemini)
       # -p for non-interactive mode; --allowed-mcp-server-names none disables MCP
