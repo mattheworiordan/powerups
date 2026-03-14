@@ -28,6 +28,7 @@ PROMPT_FILE=""
 OUTPUT_DIR=""
 TIMEOUT=300  # 5 minutes default
 EXCLUDE_AGENT=""
+ONLY_AGENTS=""  # comma-separated list of agents to run (empty = all enabled)
 
 # Helper: assert that the current option has a value argument
 require_value() {
@@ -44,12 +45,13 @@ while [[ $# -gt 0 ]]; do
     --output-dir)  require_value "$@"; OUTPUT_DIR="$2"; shift 2 ;;
     --timeout)     require_value "$@"; TIMEOUT="$2"; shift 2 ;;
     --exclude)     require_value "$@"; EXCLUDE_AGENT="$2"; shift 2 ;;
+    --agents)      require_value "$@"; ONLY_AGENTS="$2"; shift 2 ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
 done
 
 if [ -z "$CONFIG_FILE" ] || [ -z "$PROMPT_FILE" ] || [ -z "$OUTPUT_DIR" ]; then
-  echo "Usage: run-review.sh --config <file> --prompt-file <file> --output-dir <dir>" >&2
+  echo "Usage: run-review.sh --config <file> --prompt-file <file> --output-dir <dir> [--agents codex,gemini]" >&2
   exit 1
 fi
 
@@ -152,6 +154,11 @@ while IFS= read -r agent_name; do
   # Skip excluded agent (e.g., claude when running from Claude Code)
   if [ -n "$EXCLUDE_AGENT" ] && [ "$agent_name" = "$EXCLUDE_AGENT" ]; then
     echo "  Skipping $agent_name (handled by host agent)" >&2
+    continue
+  fi
+
+  # If --agents filter is set, only run agents in the list
+  if [ -n "$ONLY_AGENTS" ] && [[ ",$ONLY_AGENTS," != *",$agent_name,"* ]]; then
     continue
   fi
 
