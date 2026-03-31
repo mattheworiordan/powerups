@@ -1,7 +1,7 @@
 ---
 name: counsel
 description: Multi-agent review using local coding agents (Codex, Gemini, Claude Code). Fan out review requests to multiple agents in parallel, then synthesize their findings. Use when you want a second (or third) opinion on code changes, plans, documents, or architecture decisions.
-version: 1.1.0
+version: 1.1.1
 allowed-tools: Read, Bash, Grep, Glob, Write, Task
 argument-hint: "[review topic or 'config']"
 ---
@@ -49,11 +49,20 @@ Based on the user's request, gather the content to review:
 
 ### 4. Write the Review Prompt
 
-Write the gathered context to a temp file with review instructions:
+Write the gathered context to a temp file with review instructions.
+
+**IMPORTANT: Clean up stale files first.** Previous sessions may have left temp files that cause `mktemp` collisions or (worse) feed stale prompts to agents silently.
 
 ```bash
+rm -f /tmp/counsel-prompt-*.md  # prevent stale file collisions
 PROMPT_FILE=$(mktemp /tmp/counsel-prompt-XXXXXX.md)
 ```
+
+After writing the prompt to `$PROMPT_FILE`, **verify it was written correctly**:
+```bash
+[ -s "$PROMPT_FILE" ] && echo "Prompt ready: $(wc -c < "$PROMPT_FILE") bytes" || echo "ERROR: Prompt file empty!"
+```
+If the file is empty or missing, do NOT proceed - rewrite it.
 
 The prompt MUST include:
 1. "You are an independent code reviewer. DO NOT modify, write, or create any files."
@@ -68,6 +77,7 @@ You MUST launch all enabled agents simultaneously. This is the core of the skill
 **5a. Launch external CLI agents** (Codex, Gemini) via the review script as a background Bash command:
 
 ```bash
+rm -rf /tmp/counsel-reviews-*  # clean up stale review dirs
 REVIEW_DIR=$(mktemp -d /tmp/counsel-reviews-XXXXXX)
 bash "$COUNSEL_DIR/scripts/run-review.sh" \
   --config ~/.config/counsel/config.json \
