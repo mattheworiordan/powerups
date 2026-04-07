@@ -112,8 +112,6 @@ Use the user's answers together with your own reading to generate the output. Fo
 Add this at the very top of the document, above the existing title:
 
 ```markdown
----
-
 ## TL;DR
 
 > **What**: [1-sentence description of what this document is] | **For**: [intended audience] | **Ask**: [what you need from the reader — or "For awareness" if no action required]
@@ -131,6 +129,8 @@ Add this at the very top of the document, above the existing title:
 
 ---
 ```
+
+**IMPORTANT**: Do NOT start the TL;DR with `---` (horizontal rule). If the TL;DR is prepended to the top of a file, a leading `---` will be interpreted as YAML frontmatter by markdown renderers, causing the entire TL;DR section to be hidden/mangled.
 
 The original document follows, unchanged.
 
