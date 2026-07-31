@@ -122,6 +122,57 @@ agent_binary() {
 # tool calls lets the run complete. The repo stays safe because it is outside the
 # workspace, not because of a permission rule.
 
+# `agy` starts a child process for every configured stdio MCP server, places them
+# in their OWN process group, and does not reap them when it exits. Every review
+# would leave one orphaned server per configured server running indefinitely.
+# They accumulate until agy's own /mcp reload fails with "failed to stop existing
+# instances", because some MCP servers ignore SIGTERM and never die.
+#
+# Killing agy's process group does not reach them (different group), so match on
+# the server commands agy is actually configured to run, and only kill processes
+# that (a) appeared during our run and (b) have been orphaned to PPID 1. Both
+# conditions are required so we never touch an MCP server belonging to the user's
+# editor or another agent — those keep a real parent.
+
+# Print a pgrep pattern for each configured stdio MCP server.
+agy_mcp_patterns() {
+  local cfg="$HOME/.gemini/config/mcp_config.json"
+  [ -f "$cfg" ] || return 0
+  python3 -c "
+import json,sys
+try: d=json.load(open('$cfg'))
+except Exception: sys.exit(0)
+for s in (d.get('mcpServers') or {}).values():
+    if not s.get('command'): continue      # remote server, no local process
+    args = s.get('args') or []
+    # Prefer the first arg (usually a distinctive script path) over the launcher,
+    # which is often a shared wrapper like node or a shim.
+    print(args[0] if args else s['command'])
+" 2>/dev/null || true
+}
+
+snapshot_agy_mcp_pids() {
+  local pat
+  while IFS= read -r pat; do
+    [ -n "$pat" ] && pgrep -f "$pat" 2>/dev/null || true
+  done < <(agy_mcp_patterns) | sort -u
+}
+
+# $1 = file holding the pre-run PID snapshot
+reap_agy_mcp_orphans() {
+  local before="$1" pat pid ppid
+  [ -f "$before" ] || return 0
+  while IFS= read -r pat; do
+    [ -n "$pat" ] || continue
+    for pid in $(pgrep -f "$pat" 2>/dev/null || true); do
+      grep -qx "$pid" "$before" && continue          # pre-existing, not ours
+      ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+      [ "$ppid" = "1" ] || continue                  # still parented, leave alone
+      kill -9 "$pid" 2>/dev/null || true
+    done
+  done < <(agy_mcp_patterns)
+}
+
 # Run a single agent review (always read-only)
 # $1 = agent name
 run_agent() {
@@ -155,7 +206,9 @@ run_agent() {
       # cwd stays the throwaway workspace so incidental scratch files land there.
       local agy_ws="$OUTPUT_DIR/.agy-ws-$agent"
       local agy_pt=$(( TIMEOUT > 30 ? TIMEOUT - 15 : TIMEOUT ))
+      local agy_before="$OUTPUT_DIR/.agy-mcp-pids-$agent"
       mkdir -p "$agy_ws"
+      snapshot_agy_mcp_pids > "$agy_before"
       ( cd "$agy_ws" && run_with_timeout agy \
           -p "$(< "$PROMPT_FILE")" \
           --add-dir "$REPO_DIR" \
@@ -163,6 +216,8 @@ run_agent() {
           --disable-slash-commands \
           --print-timeout "${agy_pt}s" \
       ) > "$output_file" 2> "$error_file" || true
+      reap_agy_mcp_orphans "$agy_before"
+      rm -f "$agy_before"
       rm -rf "$agy_ws"
       ;;
     gemini)
