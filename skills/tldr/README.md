@@ -54,7 +54,7 @@ If the reader can't act on or react to the bullet, it's a topic. Make it an insi
 ## Installation
 
 ```bash
-# Via Agent Skills (Claude Code, Codex, Gemini CLI, Cursor, and more)
+# Via Agent Skills (Claude Code, Codex, Antigravity CLI, Cursor, and more)
 npx skills add mattheworiordan/powerups --skill tldr
 
 # Or install all powerups skills at once

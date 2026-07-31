@@ -51,7 +51,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [ -z "$CONFIG_FILE" ] || [ -z "$PROMPT_FILE" ] || [ -z "$OUTPUT_DIR" ]; then
-  echo "Usage: run-review.sh --config <file> --prompt-file <file> --output-dir <dir> [--agents codex,gemini]" >&2
+  echo "Usage: run-review.sh --config <file> --prompt-file <file> --output-dir <dir> [--agents codex,antigravity]" >&2
   exit 1
 fi
 
@@ -59,6 +59,9 @@ fi
 [ -f "$PROMPT_FILE" ] || { echo "Prompt file not found: $PROMPT_FILE" >&2; exit 1; }
 
 mkdir -p "$OUTPUT_DIR"
+
+# The directory under review — captured before any agent changes directory.
+REPO_DIR="$PWD"
 
 # macOS doesn't have `timeout` — use gtimeout from coreutils if available, otherwise fallback
 TIMEOUT_CMD="timeout"
@@ -79,6 +82,46 @@ run_with_timeout() {
   fi
 }
 
+# Map an agent name to the binary that implements it. These differ: Google's
+# Antigravity CLI installs as `agy`, not `antigravity`.
+agent_binary() {
+  case "$1" in
+    antigravity) echo "agy" ;;
+    *)           echo "$1" ;;
+  esac
+}
+
+# Antigravity invocation strategy — verified 2026-07-31.
+#
+# `agy` runs from a throwaway workspace with the repo added read-only via
+# --add-dir, so it can explore the codebase like the other agents while its own
+# scratch output lands in a directory we delete.
+#
+# Read-only is enforced at the PROMPT level here, exactly as it is for Codex
+# (`--full-auto` is a sandbox, not a read-only mode) and for the Claude
+# sub-agent. Antigravity exposes no per-invocation read-only mode: --mode plan
+# only steers tool selection, and permission `allow` rules in a workspace
+# .agents/settings.json are ignored. Dropping --add-dir restores hard
+# containment (the repo leaves scope entirely) at the cost of a much weaker
+# review — that trade was made deliberately in favour of comparable agents.
+#
+# Tried and does NOT work — do not "fix" this back:
+#   * Throwaway $HOME + permissions.deny write_file(*): auth is bound to the real
+#     HOME, so the run dies with "authentication required". Copying
+#     jetski_state.pbtxt / installation_id into the fake HOME does not help.
+#   * Workspace .agents/settings.json permission rules: `allow` entries are NOT
+#     honoured there — mcp(*) and even an exact mcp(matt-os/getMattContext)
+#     target still get auto-denied.
+#   * Workspace .agents/mcp_config.json with empty mcpServers: does not override
+#     the global ~/.gemini/config/mcp_config.json.
+#
+# Why --dangerously-skip-permissions is correct HERE and only here: the user's
+# global ~/.gemini/GEMINI.md mandates an MCP getMattContext call as the agent's
+# first action. Headless mode cannot approve it interactively, so it is
+# auto-denied — and the agent then STALLS and returns an EMPTY review. Allowing
+# tool calls lets the run complete. The repo stays safe because it is outside the
+# workspace, not because of a permission rule.
+
 # Run a single agent review (always read-only)
 # $1 = agent name
 run_agent() {
@@ -94,9 +137,38 @@ run_agent() {
       # avoid shell quoting issues with large prompts.
       # --skip-git-repo-check allows running in directories that aren't git repos
       # (e.g. monorepo subdirectories, non-git projects).
-      run_with_timeout codex exec --full-auto --skip-git-repo-check - < "$PROMPT_FILE" > "$output_file" 2> "$error_file" || true
+      # -c 'mcp_servers={}' strips MCP servers for this exec — counsel reviews
+      # are self-contained, and CLAUDE.md-mandated MCP context-load (e.g. matt-os
+      # getMattContext) burns tokens and can timeout the review.
+      run_with_timeout codex exec --full-auto --skip-git-repo-check -c 'mcp_servers={}' - < "$PROMPT_FILE" > "$output_file" 2> "$error_file" || true
+      ;;
+    antigravity)
+      # Google Antigravity CLI (binary `agy`) — successor to Gemini CLI.
+      # Runs in a throwaway workspace (see the strategy note above); the prompt
+      # file carries all review context, so the agent never needs the repo.
+      # --disable-slash-commands stops the prompt expanding skills mid-review.
+      # agy's own print-timeout is set just under ours so it exits cleanly with a
+      # partial answer instead of being SIGTERMed (its default is 5m regardless).
+      # --add-dir grants READ access to the repo so this agent can explore beyond
+      # the diff, matching what Codex (repo cwd) and the Claude sub-agent can do.
+      # Without it the review is materially weaker — it sees only the prompt.
+      # cwd stays the throwaway workspace so incidental scratch files land there.
+      local agy_ws="$OUTPUT_DIR/.agy-ws-$agent"
+      local agy_pt=$(( TIMEOUT > 30 ? TIMEOUT - 15 : TIMEOUT ))
+      mkdir -p "$agy_ws"
+      ( cd "$agy_ws" && run_with_timeout agy \
+          -p "$(< "$PROMPT_FILE")" \
+          --add-dir "$REPO_DIR" \
+          --dangerously-skip-permissions \
+          --disable-slash-commands \
+          --print-timeout "${agy_pt}s" \
+      ) > "$output_file" 2> "$error_file" || true
+      rm -rf "$agy_ws"
       ;;
     gemini)
+      # LEGACY — Gemini CLI stopped serving personal/Pro/Ultra accounts on
+      # 2026-06-18 (enterprise Code Assist licences excepted). Kept so machines
+      # that still have a working install keep functioning; prefer antigravity.
       # -p for non-interactive mode; --allowed-mcp-server-names none disables MCP
       # servers (prevents off-script context pollution); without --yolo, Gemini cannot
       # auto-approve tool calls so it's effectively read-only.
@@ -162,9 +234,10 @@ while IFS= read -r agent_name; do
     continue
   fi
 
-  # Check if agent CLI exists
-  if ! command -v "$agent_name" &>/dev/null; then
-    echo "  Skipping $agent_name (not installed)" >&2
+  # Check if agent CLI exists (name != binary for some agents, e.g. antigravity → agy)
+  agent_bin=$(agent_binary "$agent_name")
+  if ! command -v "$agent_bin" &>/dev/null; then
+    echo "  Skipping $agent_name ($agent_bin not installed)" >&2
     continue
   fi
 

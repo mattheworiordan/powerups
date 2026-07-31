@@ -1,7 +1,7 @@
 ---
 name: counsel
-description: Multi-agent review using local coding agents (Codex, Gemini, Claude Code). Fan out review requests to multiple agents in parallel, then synthesize their findings. Use when you want a second (or third) opinion on code changes, plans, documents, or architecture decisions.
-version: 1.1.1
+description: Multi-agent review using local coding agents (Codex, Antigravity/Gemini, Claude Code). Fan out review requests to multiple agents in parallel, then synthesize their findings. Use when you want a second (or third) opinion on code changes, plans, documents, or architecture decisions.
+version: 1.2.0
 allowed-tools: Read, Bash, Grep, Glob, Write, Task
 argument-hint: "[review topic or 'config']"
 ---
@@ -70,11 +70,37 @@ The prompt MUST include:
 3. "Provide feedback by severity: critical, important, suggestion."
 4. "Format as markdown: Summary, Critical Issues, Important Issues, Suggestions."
 
+### 4b. Check MCP Parity (before fanning out)
+
+Counsel's value depends on agents reasoning over the **same** material. If one
+agent can't reach an MCP server the others have, its review is weaker for a
+reason invisible in the output — it reads as disagreement when it's a missing
+capability.
+
+```bash
+bash "$COUNSEL_DIR/scripts/check-mcp-parity.sh"
+```
+
+If `.parity` is `"mismatch"`, show the user each line of `.warnings` and ask
+before proceeding:
+
+```
+⚠️  MCP capability mismatch between review agents:
+
+  • {warning}
+
+These agents will review with less context than the others. Proceed anyway? (yes/no)
+```
+
+Wait for an explicit yes. If they'd rather fix it first, the warning text names the
+remedy (typically authenticating a server). If the script is missing or errors,
+skip this step silently — it's a quality check, not a gate.
+
 ### 5. Fan Out to ALL Enabled Agents in Parallel
 
 You MUST launch all enabled agents simultaneously. This is the core of the skill.
 
-**5a. Launch external CLI agents** (Codex, Gemini) via the review script as a background Bash command:
+**5a. Launch external CLI agents** (Codex, Antigravity) via the review script as a background Bash command:
 
 ```bash
 rm -rf /tmp/counsel-reviews-*  # clean up stale review dirs
@@ -114,7 +140,10 @@ Wait for both background tasks to complete.
 
 Read the external agent output files from `$REVIEW_DIR/`:
 - `$REVIEW_DIR/codex.md`
-- `$REVIEW_DIR/gemini.md`
+- `$REVIEW_DIR/antigravity.md`
+- `$REVIEW_DIR/gemini.md` (only on machines still running the retired Gemini CLI)
+
+Only files that exist will be present — agents whose CLI isn't installed are skipped.
 
 The Claude Code sub-agent returns its review directly.
 
@@ -134,8 +163,8 @@ Present ALL agent reviews, then YOUR synthesis. Use this EXACT format:
 ### Codex
 {codex review output, or "Skipped/failed: {reason}"}
 
-### Gemini
-{gemini review output, or "Skipped/failed: {reason}"}
+### Antigravity
+{antigravity review output, or "Skipped/failed: {reason}"}
 
 ### Claude Code (sub-agent)
 {claude code review output}
@@ -179,7 +208,7 @@ List the detected agents and ask which to enable:
 I detected the following agents: [list from Step 1]
 Claude Code (sub-agent) is always available.
 
-Which would you like to enable? Reply with the names, e.g. "codex, gemini" or "all".
+Which would you like to enable? Reply with the names, e.g. "codex, antigravity" or "all".
 ```
 
 ### Step 3: Save Config
@@ -190,11 +219,17 @@ Write to `~/.config/counsel/config.json`:
 {
   "agents": {
     "codex": { "enabled": true },
+    "antigravity": { "enabled": true },
     "gemini": { "enabled": true },
     "claude": { "enabled": true }
   }
 }
 ```
+
+Agent names are stable config keys, not binary names — `antigravity` runs the
+`agy` binary. Leaving an agent enabled when its CLI isn't installed is harmless;
+it is skipped with a message. Keep both `antigravity` and `gemini` enabled if you
+work across machines that haven't all migrated.
 
 Then return to step 2 of the Execution Flow.
 
@@ -207,8 +242,28 @@ All agents run read-only:
 | Agent | Invocation | Why It's Read-Only |
 |-------|-----------|-------------------|
 | Codex | `codex exec --full-auto - < prompt` | Non-interactive sandboxed execution. Prompt piped via stdin. `--full-auto` enables sandboxed auto-execution. |
-| Gemini | `gemini -p "prompt" --allowed-mcp-server-names none` | Non-interactive, MCP disabled, no auto-approval for tool calls. |
+| Antigravity | `agy -p "prompt" --add-dir <repo>` from a throwaway workspace | Prompt-based restriction. Repo is added for reading; scratch output lands in the workspace, which is deleted. |
+| Gemini *(retired)* | `gemini -p "prompt" --allowed-mcp-server-names none` | Non-interactive, MCP disabled, no auto-approval for tool calls. |
 | Claude Code | Task() sub-agent with read-only prompt | Prompt-based restriction. |
+
+**Strength of each guarantee, honestly.** None of these is a hard read-only mode.
+Codex's `--full-auto` is a *sandbox*, not a read-only flag — it can write within it.
+The Claude sub-agent is restricted by its prompt. Antigravity exposes no
+per-invocation read-only mode at all: `--mode plan` only steers tool selection, and
+permission `allow` rules in a workspace `.agents/settings.json` are ignored. So the
+real guarantee across all three is the prompt instruction plus each tool's sandbox.
+Treat counsel as a review tool, not a security boundary — don't point it at a
+working tree you can't afford to have touched.
+
+Antigravity *can* be hard-contained by dropping `--add-dir`: the repo then leaves the
+workspace entirely and is provably out of scope. That was rejected because it makes
+that agent's review much weaker than its peers — it would see only the prompt. If you
+want containment over comparability, remove that one flag in `run-review.sh`.
+
+**Why Antigravity gets `--dangerously-skip-permissions` when the others don't.** A global
+context file (`~/.gemini/GEMINI.md`) can mandate an MCP call as the agent's first action.
+Headless mode cannot approve MCP interactively, so it is auto-denied — and the agent then
+stalls and returns an **empty** review. Allowing tool calls is what makes the run complete.
 
 ## Error Handling
 

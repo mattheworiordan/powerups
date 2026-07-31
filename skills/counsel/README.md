@@ -23,8 +23,16 @@ Single-agent reviews miss things. Different AI agents have different strengths, 
 | Agent | Review Mode |
 |-------|-------------|
 | [Codex](https://github.com/openai/codex) | Built-in `codex review` (inherently read-only) |
-| [Gemini CLI](https://github.com/google-gemini/gemini-cli) | Non-interactive, MCP disabled, no auto-approval (read-only) |
+| [Antigravity CLI](https://antigravity.google/product/antigravity-cli) (`agy`) | Headless, from a throwaway workspace with the repo added for reading (read-only by prompt) |
+| [Gemini CLI](https://github.com/google-gemini/gemini-cli) *(retired)* | Non-interactive, MCP disabled, no auto-approval (read-only) |
 | [Claude Code](https://code.claude.com) | Sub-agent (via Task tool) or CLI (`claude -p`) |
+
+> **Gemini CLI is retired.** Google stopped serving it for free, Google AI Pro, Ultra
+> and individual Code Assist accounts on [18 June 2026](https://developers.google.com/gemini-code-assist/docs/deprecations/code-assist-individuals);
+> only purchased enterprise Code Assist licences still work. Counsel detects both —
+> install [Antigravity CLI](https://antigravity.google/docs/cli/install) (`brew install --cask antigravity-cli`,
+> or `curl -fsSL https://antigravity.google/cli/install.sh | bash`) and Counsel picks it up
+> automatically. Machines still running a working Gemini CLI keep functioning unchanged.
 
 ---
 
@@ -60,7 +68,7 @@ Counsel is included with the powerups plugin:
 
 On first use, Counsel detects which agents are installed and walks you through setup:
 
-1. **Detection** — Scans for installed agent CLIs (codex, gemini, claude)
+1. **Detection** — Scans for installed agent CLIs (codex, antigravity, gemini, claude)
 2. **Selection** — Choose which agents to enable
 
 Configuration is saved to `~/.config/counsel/config.json`. Override per-project with `.counsel/config.json`.
@@ -93,11 +101,11 @@ Configuration is saved to `~/.config/counsel/config.json`. Override per-project 
 
 Counsel works from any host agent:
 
-| Running From | How Claude Code Reviews | How Codex/Gemini Review |
+| Running From | How Claude Code Reviews | How Codex/Antigravity Review |
 |-------------|------------------------|------------------------|
 | **Claude Code** | Task() sub-agent (richest review — can explore beyond the diff) | CLI processes via `run-review.sh` |
 | **Codex** | CLI process (`claude -p`) | CLI processes via `run-review.sh` |
-| **Gemini** | CLI process (`claude -p`) | CLI processes via `run-review.sh` |
+| **Antigravity** | CLI process (`claude -p`) | CLI processes via `run-review.sh` |
 
 When running from Claude Code, the Claude review uses a sub-agent (via the Task tool) instead of nesting CLI processes. This avoids the `CLAUDECODE` env var restriction while giving the reviewer full tool access.
 
@@ -106,6 +114,6 @@ When running from Claude Code, the Claude review uses a sub-agent (via the Task 
 ## Tips
 
 - `codex review --uncommitted` is particularly effective — it has a purpose-built review mode
-- Gemini in plan mode is safe and thorough — it can read everything but cannot modify anything
+- Counsel checks **MCP parity** before fanning out — if one agent can't reach a server the others have, you're warned before spending a review on it
 - Claude Code sub-agent provides the richest review (full tool access to explore beyond the diff)
 - The value comes from **diversity** — enable as many agents as you have installed

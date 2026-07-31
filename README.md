@@ -6,7 +6,7 @@ Developer powerups for coding, automation, and AI effectiveness.
 
 ## Cross-Platform Skills
 
-These skills work with any agent that supports the [Agent Skills](https://agentskills.io) standard — [Claude Code](https://code.claude.com), [Codex](https://github.com/openai/codex), [Gemini CLI](https://github.com/google-gemini/gemini-cli), [OpenCode](https://github.com/opencode-ai/opencode), [Cursor](https://cursor.com), and more.
+These skills work with any agent that supports the [Agent Skills](https://agentskills.io) standard — [Claude Code](https://code.claude.com), [Codex](https://github.com/openai/codex), [Antigravity CLI](https://antigravity.google/product/antigravity-cli), [OpenCode](https://github.com/opencode-ai/opencode), [Cursor](https://cursor.com), and more.
 
 ```bash
 # Install all skills
@@ -22,7 +22,7 @@ npx skills add mattheworiordan/powerups --skill worktree-cleanup
 
 | Skill | Description | Docs |
 |-------|-------------|------|
-| [**Counsel**](skills/counsel/) | Multi-agent code review — fans out to Codex, Gemini, OpenCode, and Claude Code in parallel, then synthesizes findings | [README](skills/counsel/README.md) |
+| [**Counsel**](skills/counsel/) | Multi-agent code review — fans out to Codex, Antigravity, OpenCode, and Claude Code in parallel, then synthesizes findings | [README](skills/counsel/README.md) |
 | [**Domain Search**](skills/domain-search/) | Domain name availability checking with RDAP/WHOIS verification and AI-generated alternatives | [README](skills/domain-search/README.md) |
 | [**TL;DR**](skills/tldr/) | Condense long AI-generated documents for sharing — acts as a critical first reader, surfaces issues, then creates a concise summary using the Pyramid Principle | [README](skills/tldr/README.md) |
 | [**Worktree**](skills/worktree/) | Git worktree creation with automatic branch naming, env files, and dependency installation | [README](skills/worktree/README.md) |

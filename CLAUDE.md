@@ -7,7 +7,7 @@ Developer powerups for coding, automation, and AI effectiveness.
 ```
 powerups/
 ├── skills/                     # Cross-platform agent skills (Agent Skills standard)
-│   ├── counsel/                # Multi-agent review (Codex, Gemini, OpenCode, Claude Code)
+│   ├── counsel/                # Multi-agent review (Codex, Antigravity, OpenCode, Claude Code)
 │   ├── domain-search/          # Domain name availability checking
 │   ├── tldr/                   # Document condenser — critical read, observations, Pyramid Principle summary
 │   ├── worktree/               # Git worktree creation with automatic setup
@@ -36,7 +36,7 @@ powerups/
 
 ## Cross-Platform Skills
 
-Skills in `skills/` are advertised as cross-platform (Claude Code, Codex, Gemini CLI, Cursor, etc.). Keep them that way:
+Skills in `skills/` are advertised as cross-platform (Claude Code, Codex, Antigravity CLI, Cursor, etc.). Keep them that way:
 
 - **Do not use `AskUserQuestion`** — it is Claude Code-specific and silently fails on other agents. Use natural conversation instead: present options as a numbered list in text and wait for the user's reply.
 - **Do not use `Task`** — sub-agent spawning is Claude Code-specific. Skills that need it belong in `plugins/` instead.
