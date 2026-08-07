@@ -1,343 +1,126 @@
 ---
 name: worktree
-description: Create a git worktree with proper setup (branch, env, dependencies). Use when someone wants to work on a feature/fix in isolation without switching branches.
-version: 1.2.0
-allowed-tools: Read, Bash, Grep, Glob
+description: Set up and create git worktrees the durable way — scaffold a portable `.worktreeinclude` once, then create isolated, meaningfully-named worktrees that are immediately runnable. Use when working on a feature/fix in isolation.
+version: 2.0.0
+allowed-tools: Read, Bash, Grep, Glob, Write, Edit
 ---
 
-# Create Git Worktree
+# Git Worktree
 
-Create an isolated git worktree with automatic project setup.
+Set up and create git worktrees that are **immediately runnable** and **meaningfully named**, using the well-trodden native path instead of re-copying files by hand on every creation.
 
-**Convention**: Worktrees are stored in a dedicated directory within the project root (gitignored). The default is `.git-worktree/`, but `.claude/worktrees/` is also supported for compatibility with Claude Code's native worktree feature.
+## Model (read first)
 
-## Step 1: Detect Worktree Directory
+A worktree is a fresh checkout, so git-ignored local files (`.env`, `.envrc`, secrets) and installed
+dependencies are absent. The durable fix is **declare once, apply automatically** — not "copy every time":
 
-Determine which directory to use for worktrees:
+- **`.worktreeinclude`** (repo root, committed, `.gitignore` syntax) lists the git-ignored files a worktree
+  needs. **Claude Code and Codex both copy these into new worktrees automatically.** This skill also honours
+  it for manual creation, so the list is the single source of truth (filenames, not secrets — safe to commit).
+- **Provisioning** (install deps, `direnv allow`, DB) runs in the **background** so creation stays fast.
+- **Names** must be meaningful (`type/slug`), never the auto-generated `adjective-noun-hash` codename that
+  Claude Code assigns when no name is supplied.
 
-```bash
-# Auto-detect: if .claude/worktrees/ already exists, default to that
-if [ -d ".claude/worktrees" ]; then
-  WORKTREE_DIR=".claude/worktrees"
-else
-  WORKTREE_DIR=".git-worktree"
-fi
-```
+This skill's job: **scaffold that config once** (so every future worktree — native, agent, or manual — just
+works), then **create** a well-named worktree on demand. Prefer `.claude/worktrees/` (Claude Code's native
+location); an existing `.git-worktree/` is still supported.
 
-**User overrides** (flags take priority over auto-detection):
-- `/worktree --claude-dir <name>` — Forces `WORKTREE_DIR=".claude/worktrees"`
-- `/worktree --git-dir <name>` — Forces `WORKTREE_DIR=".git-worktree"`
+## Step 1: Parse arguments
 
-Use `$WORKTREE_DIR` throughout all subsequent steps.
-
-## Step 2: Parse Arguments
-
-The user provides a name: `/worktree [flags] <name>`
-
-Flags:
-- `--quick` — Skip type prefix prompt, use name directly as branch and folder name
-- `--claude-dir` — Use `.claude/worktrees/` directory
-- `--git-dir` — Use `.git-worktree/` directory
-
-Examples:
-- `/worktree fix-login-bug` — Needs type prefix
-- `/worktree feature/dark-mode` — Already has prefix, use as-is
-- `/worktree --quick auth-fix` — Uses `auth-fix` as both branch and folder name directly
-- `/worktree` (no args) — Ask what they're working on
-
-## Step 3: Determine Branch Name
-
-**If `--quick` flag is set**: Use the name as-is for both the branch name and the folder name. Skip the type prefix prompt entirely.
-
-Otherwise, check if the name already has a type prefix:
+`/worktree [flags] [name]`
+- `name` — e.g. `feature/dark-mode` or `dark-mode`. If omitted, ask what the work is (a name needs intent).
+- `--init` — only scaffold repo config; do not create a worktree.
+- `--quick` — use `name` as-is for branch + folder (it must still be meaningful, not a codename).
 
 ```bash
-# Check for existing prefix patterns
-echo "$NAME" | grep -E "^(feature|fix|bugfix|hotfix|chore|refactor|docs|test)/"
+git rev-parse --show-toplevel >/dev/null 2>&1 || { echo "Not a git repo"; exit 1; }
+ROOT=$(git rev-parse --show-toplevel); cd "$ROOT"
 ```
 
-**If prefix exists**: Use the name as-is for the branch.
+## Step 2: Ensure repo config (idempotent — run every time)
 
-**If no prefix**: Ask the user what type of work this is:
+This is what makes worktrees durable for *all* creation paths, not just this skill.
 
-```
-What type of work is this?
-1. feature - New functionality
-2. fix - Bug fix
-3. chore - Maintenance/cleanup
-4. refactor - Code restructuring
-5. docs - Documentation
-```
-
-Then construct: `{type}/{name}` (e.g., `feature/dark-mode`)
-
-**Worktree folder name**: Use the name without the prefix for cleaner paths.
-- Branch: `feature/dark-mode` → Folder: `$WORKTREE_DIR/dark-mode/`
-
-## Step 4: Check Prerequisites
-
+### 2a. Respect an existing WorktreeCreate hook
 ```bash
-# Verify we're in a git repo
-git rev-parse --git-dir
-
-# Check if worktree already exists
-ls -d "$WORKTREE_DIR/{folder-name}" 2>/dev/null
-
-# Check if branch already exists
-git branch --list "{branch-name}"
-git branch -r --list "origin/{branch-name}"
+grep -rlq "WorktreeCreate" .claude/settings*.json 2>/dev/null && echo "HAS_WORKTREE_CREATE_HOOK"
 ```
+If present, the repo already owns worktree setup, and **Claude Code ignores `.worktreeinclude` when a
+`WorktreeCreate` hook exists** — so that hook must copy env + provision itself. Do **not** add a competing
+`.worktreeinclude`; instead verify the hook is correct and skip 2b–2d.
 
-**If worktree exists**: Ask user - resume existing, or create with different name?
-
-**If branch exists remotely but not local**: Offer to track it instead of creating new.
-
-## Step 5: Detect Project Type
-
+### 2b. Scaffold `.worktreeinclude` (the env declaration)
+Discover candidate env files, then keep only the ones git actually ignores (so committed files like
+`.env.example` are never copied):
 ```bash
-# Check for project markers
-ls package.json 2>/dev/null && echo "NODE"
-ls Gemfile 2>/dev/null && echo "RUBY"
-ls Cargo.toml 2>/dev/null && echo "RUST"
-ls go.mod 2>/dev/null && echo "GO"
-ls pyproject.toml setup.py requirements.txt 2>/dev/null && echo "PYTHON"
-ls mix.exs 2>/dev/null && echo "ELIXIR"
-
-# Check for framework-specific markers (affects env file handling)
-ls next.config.* 2>/dev/null && echo "NEXTJS"
-ls vite.config.* 2>/dev/null && echo "VITE"
-ls nuxt.config.* 2>/dev/null && echo "NUXT"
-```
-
-Store detected types (can be multiple, e.g., Rails + Node).
-
-**Framework markers** (NEXTJS, VITE, NUXT) affect env file conventions - see Step 6.
-
-## Step 6: Identify Environment Files
-
-Find env files across the entire project, not just the root:
-
-```bash
-# Find all env files recursively (untracked/gitignored files that need copying)
 find . -maxdepth 4 \( -name ".env" -o -name ".env.*" -o -name ".envrc" \) \
   -not -path "*/node_modules/*" -not -path "*/.git/*" \
-  -not -path "*/.git-worktree/*" -not -path "*/.claude/worktrees/*" \
-  -not -path "*/.venv/*" -not -path "*/vendor/*" 2>/dev/null
+  -not -path "*/.claude/worktrees/*" -not -path "*/.git-worktree/*" \
+  -not -path "*/.venv/*" -not -path "*/vendor/*" 2>/dev/null | sed 's|^\./||' \
+  | while read -r f; do git check-ignore -q "$f" && echo "$f"; done
 ```
+Write/merge these paths into `.worktreeinclude` at the repo root (don't duplicate existing lines; keep a short
+header comment). Then **commit it** — every teammate and agent benefits, and it's read by Claude Code and Codex.
 
-This catches both root-level files (`.env`, `.env.local`) and subdirectory files (`packages/api/.env`, `config/.envrc`, `apps/web/.env.local`).
+### 2c. Gitignore the worktree directory
+Ensure `.claude/worktrees/` is ignored — prefer the user's global gitignore (`git config --global core.excludesfile`),
+falling back to the repo `.gitignore`.
 
-Store the full list of discovered files with their relative paths.
+### 2d. Note provisioning
+If the repo has dependencies (package.json / Gemfile / go.mod / …) or a `.envrc`, the worktree also needs
+`install` + `direnv allow`. This skill runs that in the background at create time (Step 5). For worktrees created
+*outside* this skill (native `claude --worktree`, agents), add a repo `SessionStart` hook that does the same;
+offer to scaffold one if the user wants that and none exists.
 
-### Framework-Specific Conventions
+## Step 3: Determine a meaningful branch name
 
-Different frameworks have different conventions for env files:
+Never accept a random codename. If `name` matches `^[a-z]+-[a-z]+-[0-9a-f]{4,}$` (an auto-generated codename),
+reject it and ask for a real one.
 
-| Framework | Local secrets file | Committed defaults | Notes |
-|-----------|-------------------|-------------------|-------|
-| **Next.js/Vite/Nuxt** | `.env.local` | `.env` | `.env.local` is gitignored, `.env` is committed |
-| **Rails/Django/Generic** | `.env` | `.env.example` | `.env` is gitignored |
-| **Docker Compose** | `.env` | `.env.example` | `.env` is gitignored |
+If `--quick`, use `name` as-is. Otherwise, if it already has a `feature|fix|bugfix|hotfix|chore|refactor|docs|test/`
+prefix use it; else ask the type and construct `{type}/{slug}`. Folder name = slug without the prefix.
 
-### Priority for root-level files
-
-**For Next.js/Vite/Nuxt projects** (detected in Step 5):
-1. `.env` from source → copy as `.env.local` (the local secrets file convention)
-2. `.env.local` from source → copy as `.env.local`
-3. `.env.development` from source → copy as `.env.development`
-4. `.env.example` → copy as `.env.local`
-
-**For all other projects**:
-1. `.env` - if exists, copy as `.env`
-2. `.env.local` - if exists, copy as `.env.local`
-3. `.env.development` - if exists, copy as `.env.development`
-4. `.env.example` / `.env.sample` - copy as `.env` (ask if unclear)
-
-### Subdirectory files
-
-All env files found in subdirectories should be copied preserving their relative path. No framework-specific renaming is applied to subdirectory files — they are copied as-is to maintain the project's existing structure.
-
-**Edge cases**: Some frameworks use different patterns (Rails 7+ `config/credentials.yml.enc`, Phoenix `config/runtime.exs`, Serverless `samconfig.toml`). If you detect these, use your judgment on what to copy.
-
-## Step 7: Create Worktree
+## Step 4: Create the worktree
 
 ```bash
-# Ensure worktree directory exists
-mkdir -p "$WORKTREE_DIR"
+WT_DIR=".claude/worktrees"; [ -d ".git-worktree" ] && [ ! -d ".claude/worktrees" ] && WT_DIR=".git-worktree"
+mkdir -p "$WT_DIR"
+BASE=$(git branch --show-current)
+git worktree add -b "{branch}" "$WT_DIR/{folder}" "$BASE"   # LEFTHOOK=0 prefix if the repo's post-checkout is heavy
+```
 
-# Handle gitignore for the worktree directory
-GITIGNORE_PATTERN=$(basename "$WORKTREE_DIR")
-if [ "$WORKTREE_DIR" = ".claude/worktrees" ]; then
-  GITIGNORE_PATTERN=".claude/worktrees"
+
+## Step 5: Apply `.worktreeinclude` + provision (background)
+
+Plain `git worktree add` does not honour `.worktreeinclude` (only Claude Code's own creation does), so the skill
+applies it — reusing the same declared list rather than re-discovering:
+```bash
+cd "$WT_DIR/{folder}"
+if [ -f "$ROOT/.worktreeinclude" ]; then
+  grep -vE '^\s*#|^\s*$' "$ROOT/.worktreeinclude" | while read -r pat; do
+    for f in $(cd "$ROOT" && ls -d $pat 2>/dev/null); do
+      mkdir -p "$(dirname "$f")"; cp "$ROOT/$f" "$f" 2>/dev/null
+    done
+  done
 fi
-
-GLOBAL_GITIGNORE=$(git config --global core.excludesfile 2>/dev/null)
-GLOBAL_GITIGNORE="${GLOBAL_GITIGNORE/#\~/$HOME}"
-if [ -n "$GLOBAL_GITIGNORE" ] && grep -q "$GITIGNORE_PATTERN" "$GLOBAL_GITIGNORE" 2>/dev/null; then
-  echo "✓ $WORKTREE_DIR is already in your global gitignore ($GLOBAL_GITIGNORE)"
-else
-  echo "💡 Tip: Add $GITIGNORE_PATTERN to your global gitignore so it applies to all repos:"
-  echo "    echo '$GITIGNORE_PATTERN' >> $(git config --global core.excludesfile || echo '~/.gitignore')"
-  grep -q "$GITIGNORE_PATTERN" .gitignore 2>/dev/null || echo "$GITIGNORE_PATTERN" >> .gitignore
-  echo "  (Added to local .gitignore for now)"
-fi
-
-# Get current branch as base
-BASE_BRANCH=$(git branch --show-current)
-
-# Create the worktree with new branch
-git worktree add -b "{branch-name}" "$WORKTREE_DIR/{folder-name}" "$BASE_BRANCH"
+[ -f .envrc ] && command -v direnv >/dev/null && direnv allow . 2>/dev/null   # unblock copied .envrc
 ```
+Then install dependencies **in the background** (idempotent; don't block): pick the package manager by lockfile
+(`yarn`/`pnpm`/`bun`/`npm ci`), `bundle install`, `go mod download`, etc. Log to `.worktree-setup.log`. Never
+symlink `node_modules` from the main checkout (breaks when lockfiles diverge — pnpm's store / `npm ci` are cheap).
 
-## Step 8: Copy Environment Files
-
-```bash
-cd "$WORKTREE_DIR/{folder-name}"
+## Step 6: Report
 ```
-
-Calculate the relative path back to the project root based on `$WORKTREE_DIR`:
-- If `WORKTREE_DIR=".git-worktree"` → `SOURCE_ROOT="../.."`
-- If `WORKTREE_DIR=".claude/worktrees"` → `SOURCE_ROOT="../../.."`
-
-### Root-level env files
-
-**For Next.js/Vite/Nuxt projects** (use `.env.local` convention):
-```bash
-# Copy .env as .env.local (the local secrets file in these frameworks)
-cp "$SOURCE_ROOT/.env" .env.local 2>/dev/null
-# Also copy existing .env.local and .env.development
-cp "$SOURCE_ROOT/.env.local" .env.local 2>/dev/null  # Will overwrite above if exists
-cp "$SOURCE_ROOT/.env.development" .env.development 2>/dev/null
+Worktree ready:  {branch}  →  $WT_DIR/{folder}/
+  ✓ env from .worktreeinclude: <files>        ✓ direnv allowed
+  … deps installing in background (tail .worktree-setup.log)
+Open a new Claude session there:  cd $WT_DIR/{folder}
 ```
-
-If only `.env.example` exists:
-```bash
-cp "$SOURCE_ROOT/.env.example" .env.local
-```
-
-**For all other projects** (use `.env` convention):
-```bash
-# Copy each detected env file
-cp "$SOURCE_ROOT/.env" .env 2>/dev/null
-cp "$SOURCE_ROOT/.env.local" .env.local 2>/dev/null
-cp "$SOURCE_ROOT/.env.development" .env.development 2>/dev/null
-```
-
-If only `.env.example` exists:
-```bash
-cp "$SOURCE_ROOT/.env.example" .env
-```
-
-### Subdirectory env files
-
-For every env file found in a subdirectory during Step 6, copy it preserving its relative path:
-
-```bash
-# For each subdirectory env file discovered in Step 6 (excluding root-level ones already handled above)
-for f in $SUBDIR_ENV_FILES; do
-  mkdir -p "$(dirname "$f")"
-  cp "$SOURCE_ROOT/$f" "$f" 2>/dev/null
-done
-```
-
-For example, if Step 6 found `packages/api/.env` and `config/.envrc`, this creates the subdirectories and copies each file into the worktree at the same relative path.
-
-## Step 9: Install Dependencies
-
-Based on detected project types:
-
-**Node (package.json)**:
-```bash
-# Check for lock files to determine package manager
-if [ -f "yarn.lock" ]; then
-  yarn install
-elif [ -f "pnpm-lock.yaml" ]; then
-  pnpm install
-elif [ -f "bun.lockb" ]; then
-  bun install
-else
-  npm install
-fi
-```
-
-**Ruby (Gemfile)**:
-```bash
-bundle install
-```
-
-**Python (requirements.txt or pyproject.toml)**:
-```bash
-if [ -f "pyproject.toml" ]; then
-  pip install -e .
-elif [ -f "requirements.txt" ]; then
-  pip install -r requirements.txt
-fi
-```
-
-**Rust (Cargo.toml)**:
-```bash
-cargo build
-```
-
-**Go (go.mod)**:
-```bash
-go mod download
-```
-
-## Step 10: Simple Verification
-
-Check that setup succeeded:
-
-```bash
-# Verify at least one env file exists (root or subdirectory)
-find . -maxdepth 4 \( -name ".env" -o -name ".env.*" -o -name ".envrc" \) \
-  -not -path "*/node_modules/*" -not -path "*/.git/*" | head -1 | grep -q .
-
-# Verify dependencies installed (check for node_modules, vendor, etc.)
-[ -d "node_modules" ] || [ -d "vendor" ] || [ -d ".venv" ] || [ -d "target" ]
-```
-
-Just check exit codes - no test runs.
-
-## Step 11: Report Success
-
-```
-Worktree created successfully!
-
-  Branch: feature/dark-mode
-  Path:   $WORKTREE_DIR/dark-mode/
-  Base:   main
-
-Setup completed:
-  ✓ Environment files copied (.env.local, packages/api/.env, config/.envrc)
-  ✓ Dependencies installed (yarn)
-
-To start working:
-  cd $WORKTREE_DIR/dark-mode/
-
-Or open a new terminal/Claude session in that directory.
-```
-
-Report all env files that were copied - both root-level and subdirectory files. List the actual paths so the user can verify nothing was missed.
-
-## Error Handling
-
-**Git worktree add fails**:
-- Check if branch name conflicts
-- Check if path already exists
-- Suggest `git worktree prune` if stale references
-
-**Dependency install fails**:
-- Report the error but don't fail completely
-- Suggest user investigate manually
-
-**No env files found**:
-- Warn but continue
-- Suggest checking if project needs environment setup
+List the files that were copied so nothing silently missing.
 
 ## Notes
-
-- Always use `$WORKTREE_DIR` subfolder (gitignored, organized)
-- Folder name = branch name without type prefix for cleaner paths
-- Don't run tests or builds during setup - just dependency installation
-- The user will open a new Claude session in the worktree directory
+- **Declare once, not copy-every-time.** The value here is scaffolding `.worktreeinclude` (portable across Claude
+  Code and Codex) and enforcing good names — not the copying itself.
+- `git check-ignore` is the guard that stops committed files being treated as secrets to copy.
+- Cleanup is a separate skill: `/worktree-cleanup`.
+- Don't run tests/builds during setup — just dependency install, in the background.
