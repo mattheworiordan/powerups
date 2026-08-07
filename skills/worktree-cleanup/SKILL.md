@@ -1,7 +1,7 @@
 ---
 name: worktree-cleanup
-description: List and remove git worktrees interactively. Use when someone wants to clean up old worktrees, prune stale branches, or see worktree status.
-version: 1.2.0
+description: List and remove git worktrees interactively. Use when someone wants to clean up old worktrees, prune stale branches, or see worktree status. Refuses to delete branches that belong to an open stacked-PR stack.
+version: 1.3.0
 allowed-tools: Read, Bash, Grep, Glob
 ---
 
@@ -61,7 +61,15 @@ git branch -r | grep -q "origin/{branch}" && echo "REMOTE" || echo "LOCAL_ONLY"
 # Check for uncommitted changes
 cd "$WORKTREE_DIR/{name}"
 git status --porcelain | head -5
+
+# Stack membership (GitHub stacked PRs) — fail-soft if the gh-stack extension is absent
+cd "$WORKTREE_DIR/{name}"
+gh stack view --json 2>/dev/null
 ```
+
+If `gh stack view --json` succeeds and shows the worktree's branch in a stack with open PRs, mark the
+worktree **IN STACK** (note the stack/PR numbers). Sibling layers need that branch for restacks until
+the stack merges or is unstacked.
 
 ## Step 4: Present Interactive List
 
@@ -106,6 +114,7 @@ Which worktrees should I remove? Reply with:
 **Important warnings to show alongside unmerged/dirty worktrees**:
 - If worktree has uncommitted changes: "⚠ Has uncommitted changes - will be lost!"
 - If branch not merged: "⚠ Branch not merged - work may be lost!"
+- If branch is in an open stack: "⚠ In open stack — sibling PRs are based on this branch. The branch will NOT be deleted."
 
 ## Step 6: Confirm Dangerous Removals
 
@@ -139,6 +148,11 @@ Delete the branch anyway? [y/N]
 ```
 
 Use `git branch -D` (force) only if user confirms.
+
+**If branch is in an OPEN stack, never delete it** — deleting a stack member breaks local stack tracking
+and every future restack of the layers above it. Removing the worktree folder is allowed (the branch
+survives); say the branch was kept and why. The user must merge the stack or `gh stack unstack` first if
+they truly want the branch gone.
 
 ## Step 8: Prune Stale References
 
@@ -188,5 +202,6 @@ git worktree prune
 1. **Always show status before removal** - merged/unmerged, uncommitted changes
 2. **Require explicit confirmation** for unmerged or dirty worktrees
 3. **Never auto-delete branches** that aren't merged
-4. **Keep a record** of what was removed in the output
-5. **Run git worktree prune** at the end to clean up stale refs
+4. **Never delete a branch in an open stacked-PR stack** - sibling PRs are based on it; worktree folder removal is fine, branch deletion is not
+5. **Keep a record** of what was removed in the output
+6. **Run git worktree prune** at the end to clean up stale refs

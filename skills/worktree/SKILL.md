@@ -1,7 +1,7 @@
 ---
 name: worktree
-description: Set up and create git worktrees the durable way — scaffold a portable `.worktreeinclude` once, then create isolated, meaningfully-named worktrees that are immediately runnable. Use when working on a feature/fix in isolation.
-version: 2.0.0
+description: Set up and create git worktrees the durable way — scaffold a portable `.worktreeinclude` once, then create isolated, meaningfully-named worktrees that are immediately runnable. Stack-aware — one worktree per GitHub stacked-PR stack, never one per layer. Use when working on a feature/fix in isolation.
+version: 2.1.0
 allowed-tools: Read, Bash, Grep, Glob, Write, Edit
 ---
 
@@ -20,6 +20,9 @@ dependencies are absent. The durable fix is **declare once, apply automatically*
 - **Provisioning** (install deps, `direnv allow`, DB) runs in the **background** so creation stays fast.
 - **Names** must be meaningful (`type/slug`), never the auto-generated `adjective-noun-hash` codename that
   Claude Code assigns when no name is supplied.
+- **Stacked PRs: one worktree per STACK, not per layer.** A GitHub stacked-PR chain (`gh stack`) lives
+  inside a single worktree; layers are branches you move between with `gh stack up`/`down` inside it.
+  Never give each layer its own worktree — `gh stack rebase` fails on branches checked out elsewhere.
 
 This skill's job: **scaffold that config once** (so every future worktree — native, agent, or manual — just
 works), then **create** a well-named worktree on demand. Prefer `.claude/worktrees/` (Claude Code's native
@@ -89,6 +92,13 @@ BASE=$(git branch --show-current)
 git worktree add -b "{branch}" "$WT_DIR/{folder}" "$BASE"   # LEFTHOOK=0 prefix if the repo's post-checkout is heavy
 ```
 
+**Stacked-PR handling** (GitHub native stacks via `gh stack`):
+- **New layer on an existing stack?** Do NOT create a worktree. Go to the stack's worktree and run
+  `gh stack add {type}/{slug}` from its top branch — the layer belongs in that worktree.
+- **Starting a stack deliberately?** Create the worktree as above, then adopt its branch as the first
+  layer from inside it: `gh stack init {branch}`. Add later layers with `gh stack add`.
+- A plain worktree branch can be adopted into a stack later (`gh stack init {branch}`), so starting
+  plain loses nothing.
 
 ## Step 5: Apply `.worktreeinclude` + provision (background)
 

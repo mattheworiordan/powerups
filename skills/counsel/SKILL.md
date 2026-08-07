@@ -43,7 +43,7 @@ Based on the user's request, gather the content to review:
 |--------------|----|
 | `/counsel` (no topic) | `git diff` + `git diff --cached` |
 | "review recent commits" | `git log -5 --oneline` + `git diff HEAD~5..HEAD` |
-| "review this PR" / "review PR #123" | `git diff main...HEAD` or `gh pr diff` |
+| "review this PR" / "review PR #123" | `gh pr diff`, or `BASE=$(gh pr view --json baseRefName -q .baseRefName 2>/dev/null \|\| echo main); git diff "$BASE"...HEAD` — resolve the PR's real base; a stacked PR targets a sibling branch, so `main...HEAD` would blame it for its parents' diff |
 | "review [specific file/path]" | Read the specified file(s) |
 | general topic | Gather relevant files |
 
