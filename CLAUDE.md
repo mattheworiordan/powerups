@@ -7,7 +7,7 @@ Developer powerups for coding, automation, and AI effectiveness.
 ```
 powerups/
 ├── skills/                     # Cross-platform agent skills (Agent Skills standard)
-│   ├── counsel/                # Multi-agent review (Codex, Antigravity, OpenCode, Claude Code)
+│   ├── counsel/                # Multi-agent review (Codex, Antigravity, Grok CLI, Claude Code)
 │   ├── domain-search/          # Domain name availability checking
 │   ├── tldr/                   # Document condenser — critical read, observations, Pyramid Principle summary
 │   ├── worktree/               # Git worktree creation with automatic setup

@@ -25,6 +25,7 @@ Single-agent reviews miss things. Different AI agents have different strengths, 
 | [Codex](https://github.com/openai/codex) | Built-in `codex review` (inherently read-only) |
 | [Antigravity CLI](https://antigravity.google/product/antigravity-cli) (`agy`) | Headless, from a throwaway workspace with the repo added for reading (read-only by prompt) |
 | [Gemini CLI](https://github.com/google-gemini/gemini-cli) *(retired)* | Non-interactive, MCP disabled, no auto-approval (read-only) |
+| [Grok CLI](https://x.ai/news/grok-build-cli) | Headless `grok --prompt-file` with `--sandbox read-only` |
 | [Claude Code](https://code.claude.com) | Sub-agent (via Task tool) or CLI (`claude -p`) |
 
 > **Gemini CLI is retired.** Google stopped serving it for free, Google AI Pro, Ultra
@@ -68,7 +69,7 @@ Counsel is included with the powerups plugin:
 
 On first use, Counsel detects which agents are installed and walks you through setup:
 
-1. **Detection** — Scans for installed agent CLIs (codex, antigravity, gemini, claude)
+1. **Detection** — Scans for installed agent CLIs (codex, antigravity, gemini, grok, claude)
 2. **Selection** — Choose which agents to enable
 
 Configuration is saved to `~/.config/counsel/config.json`. Override per-project with `.counsel/config.json`.
@@ -101,13 +102,14 @@ Configuration is saved to `~/.config/counsel/config.json`. Override per-project 
 
 Counsel works from any host agent:
 
-| Running From | How Claude Code Reviews | How Codex/Antigravity Review |
-|-------------|------------------------|------------------------|
-| **Claude Code** | Task() sub-agent (richest review — can explore beyond the diff) | CLI processes via `run-review.sh` |
-| **Codex** | CLI process (`claude -p`) | CLI processes via `run-review.sh` |
-| **Antigravity** | CLI process (`claude -p`) | CLI processes via `run-review.sh` |
+| Running From | How the host reviews | How the other agents review |
+|-------------|----------------------|-----------------------------|
+| **Claude Code** | Task() sub-agent (richest review — can explore beyond the diff) | CLI processes via `run-review.sh` (includes Grok) |
+| **Grok CLI** | spawn_subagent (read-only prompt) | CLI processes via `run-review.sh` (includes `claude -p`) |
+| **Codex** | already in the CLI fan-out | CLI processes via `run-review.sh` |
+| **Antigravity** | already in the CLI fan-out | CLI processes via `run-review.sh` |
 
-When running from Claude Code, the Claude review uses a sub-agent (via the Task tool) instead of nesting CLI processes. This avoids the `CLAUDECODE` env var restriction while giving the reviewer full tool access.
+When running from Claude Code, the Claude review uses a sub-agent (via the Task tool) instead of nesting CLI processes. This avoids the `CLAUDECODE` env var restriction while giving the reviewer full tool access. Grok does the same with `spawn_subagent` and `--exclude grok`.
 
 ---
 

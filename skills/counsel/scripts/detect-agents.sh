@@ -14,6 +14,7 @@ AGENT_REGISTRY=(
   "codex|codex|codex --version"
   "antigravity|agy|agy --version"
   "gemini|gemini|gemini --version"
+  "grok|grok|grok --version"
   "claude|claude|echo skipped"
 )
 

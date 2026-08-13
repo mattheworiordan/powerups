@@ -1,7 +1,7 @@
 ---
 name: counsel
-description: Multi-agent review using local coding agents (Codex, Antigravity/Gemini, Claude Code). Fan out review requests to multiple agents in parallel, then synthesize their findings. Use when you want a second (or third) opinion on code changes, plans, documents, or architecture decisions.
-version: 1.2.0
+description: Multi-agent review using local coding agents (Codex, Antigravity/Gemini, Grok CLI, Claude Code). Fan out review requests to multiple agents in parallel, then synthesize their findings. Use when you want a second (or third) opinion on code changes, plans, documents, or architecture decisions.
+version: 1.3.0
 allowed-tools: Read, Bash, Grep, Glob, Write, Task
 argument-hint: "[review topic or 'config']"
 ---
@@ -29,7 +29,20 @@ If `NO_CONFIG`, jump to the **Configuration** section, then return here.
 ### 2. Locate Scripts
 
 ```bash
-COUNSEL_DIR=$(find ~/.claude ~/.claude-personal ~/.claude-work ~/Projects -path "*/counsel/scripts/detect-agents.sh" -print -quit 2>/dev/null | xargs dirname 2>/dev/null | xargs dirname 2>/dev/null)
+COUNSEL_DIR=""
+for d in \
+  "$HOME/.grok/skills/counsel" \
+  "$HOME/.codex/skills/counsel" \
+  "$HOME/.gemini/antigravity-cli/skills/counsel" \
+  "$HOME/.claude/skills/counsel" \
+  "$HOME/.claude-personal/skills/counsel" \
+  "$HOME/.claude-work/skills/counsel" \
+  "$HOME/Projects/powerups/skills/counsel"; do
+  if [ -f "$d/scripts/detect-agents.sh" ]; then
+    COUNSEL_DIR=$(cd "$d" && pwd -P)
+    break
+  fi
+done
 echo "COUNSEL_DIR=$COUNSEL_DIR"
 ```
 
@@ -100,7 +113,15 @@ skip this step silently — it's a quality check, not a gate.
 
 You MUST launch all enabled agents simultaneously. This is the core of the skill.
 
-**5a. Launch external CLI agents** (Codex, Antigravity) via the review script as a background Bash command:
+Detect the host agent first. Exclude the host from the CLI fan-out so it does not nest inside itself.
+
+| You are | `--exclude` | Host review (5b) |
+|---------|-------------|------------------|
+| Claude Code | `claude` | Task() / general-purpose sub-agent |
+| Grok CLI | `grok` | spawn_subagent (read-only prompt) |
+| Codex / Antigravity / other | the host name if it is in the config | none — that agent is already in 5a via CLI, or skipped |
+
+**5a. Launch external CLI agents** via the review script as a background Bash command:
 
 ```bash
 rm -rf /tmp/counsel-reviews-*  # clean up stale review dirs
@@ -109,28 +130,25 @@ bash "$COUNSEL_DIR/scripts/run-review.sh" \
   --config ~/.config/counsel/config.json \
   --prompt-file "$PROMPT_FILE" \
   --output-dir "$REVIEW_DIR" \
-  --exclude claude
+  --exclude HOST
 ```
 
-Run this as a **background** Bash command (run_in_background=true).
+Replace `HOST` with `claude` or `grok` as in the table. Run this as a **background** Bash command (run_in_background=true).
 
-**5b. Launch Claude Code sub-agent** via the Task tool at the SAME TIME as 5a:
+**5b. Launch the host's own reviewer** at the SAME TIME as 5a, with a read-only prompt:
 
 ```
-Task(
-  subagent_type="general-purpose",
-  description="Counsel review",
-  prompt="You are an independent code reviewer performing a READ-ONLY review.
+You are an independent code reviewer performing a READ-ONLY review.
 DO NOT modify, write, or create any files. DO NOT run commands that change state.
 Analyze and report findings only.
 
 {PASTE THE REVIEW CONTEXT HERE}
 
 Provide specific, actionable feedback by severity (critical, important, suggestion).
-Format as markdown with sections: Summary, Critical Issues, Important Issues, Suggestions.",
-  run_in_background=true
-)
+Format as markdown with sections: Summary, Critical Issues, Important Issues, Suggestions.
 ```
+
+Claude Code host → Task() general-purpose sub-agent. Grok CLI host → spawn_subagent. Other hosts skip 5b.
 
 **IMPORTANT**: Launch BOTH 5a and 5b in the same message so they run in parallel.
 
@@ -141,11 +159,13 @@ Wait for both background tasks to complete.
 Read the external agent output files from `$REVIEW_DIR/`:
 - `$REVIEW_DIR/codex.md`
 - `$REVIEW_DIR/antigravity.md`
+- `$REVIEW_DIR/grok.md`
 - `$REVIEW_DIR/gemini.md` (only on machines still running the retired Gemini CLI)
+- `$REVIEW_DIR/claude.md` (only when the host is not Claude Code)
 
 Only files that exist will be present — agents whose CLI isn't installed are skipped.
 
-The Claude Code sub-agent returns its review directly.
+The host sub-agent (Claude Task() or Grok spawn_subagent) returns its review directly.
 
 Then clean up:
 ```bash
@@ -165,6 +185,9 @@ Present ALL agent reviews, then YOUR synthesis. Use this EXACT format:
 
 ### Antigravity
 {antigravity review output, or "Skipped/failed: {reason}"}
+
+### Grok
+{grok review output, or "Skipped/failed: {reason}"}
 
 ### Claude Code (sub-agent)
 {claude code review output}
@@ -208,7 +231,7 @@ List the detected agents and ask which to enable:
 I detected the following agents: [list from Step 1]
 Claude Code (sub-agent) is always available.
 
-Which would you like to enable? Reply with the names, e.g. "codex, antigravity" or "all".
+Which would you like to enable? Reply with the names, e.g. "codex, antigravity, grok" or "all".
 ```
 
 ### Step 3: Save Config
@@ -221,6 +244,7 @@ Write to `~/.config/counsel/config.json`:
     "codex": { "enabled": true },
     "antigravity": { "enabled": true },
     "gemini": { "enabled": true },
+    "grok": { "enabled": true },
     "claude": { "enabled": true }
   }
 }
@@ -243,6 +267,7 @@ All agents run read-only:
 |-------|-----------|-------------------|
 | Codex | `codex exec --full-auto - < prompt` | Non-interactive sandboxed execution. Prompt piped via stdin. `--full-auto` enables sandboxed auto-execution. |
 | Antigravity | `agy -p "prompt" --add-dir <repo>` from a throwaway workspace | Prompt-based restriction. Repo is added for reading; scratch output lands in the workspace, which is deleted. |
+| Grok | `grok --prompt-file … --sandbox read-only --yolo` | Kernel sandbox (read-only) plus write tools denied. `--yolo` auto-approves so a mandated MCP call cannot stall the run. |
 | Gemini *(retired)* | `gemini -p "prompt" --allowed-mcp-server-names none` | Non-interactive, MCP disabled, no auto-approval for tool calls. |
 | Claude Code | Task() sub-agent with read-only prompt | Prompt-based restriction. |
 

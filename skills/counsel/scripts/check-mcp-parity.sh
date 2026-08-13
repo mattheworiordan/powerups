@@ -70,6 +70,13 @@ for k in (d.get('mcpServers') or {}): print(k)
 " 2>/dev/null || true
 }
 
+servers_grok() {
+  # Grok CLI: [mcp_servers.<name>] in ~/.grok/config.toml. Match only
+  # top-level entries — skip nested [mcp_servers.<name>.headers] / .env.
+  [ -f "$HOME/.grok/config.toml" ] || return 0
+  sed -nE 's/^\[mcp_servers\.([^].]+)\]$/\1/p' "$HOME/.grok/config.toml" 2>/dev/null | sort -u || true
+}
+
 agent_binary() {
   case "$1" in
     antigravity) echo "agy" ;;
@@ -78,7 +85,7 @@ agent_binary() {
 }
 
 # --- gather ------------------------------------------------------------------
-AGENTS="claude codex antigravity gemini"
+AGENTS="claude codex antigravity gemini grok"
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 
 INSTALLED=()

@@ -220,6 +220,19 @@ run_agent() {
       rm -f "$agy_before"
       rm -rf "$agy_ws"
       ;;
+    grok)
+      # Grok CLI headless review. --prompt-file triggers non-interactive mode.
+      # --sandbox read-only blocks writes to the repo (kernel-enforced on macOS).
+      # --yolo auto-approves tool calls so a mandated getMattContext cannot stall
+      # the run the way Antigravity does without --dangerously-skip-permissions.
+      # --disallowed-tools removes the write tools even inside the sandbox.
+      run_with_timeout grok \
+        --prompt-file "$PROMPT_FILE" \
+        --sandbox read-only \
+        --yolo \
+        --disallowed-tools "search_replace,write" \
+        > "$output_file" 2> "$error_file" || true
+      ;;
     gemini)
       # LEGACY — Gemini CLI stopped serving personal/Pro/Ultra accounts on
       # 2026-06-18 (enterprise Code Assist licences excepted). Kept so machines
