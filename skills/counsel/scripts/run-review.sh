@@ -183,15 +183,16 @@ run_agent() {
   case "$agent" in
     codex)
       # Use `codex exec` for custom prompt reviews (non-interactive, sandboxed).
-      # Falls back to `codex exec review` for code-only reviews when no prompt is given.
-      # --full-auto enables sandboxed auto-execution; prompt is passed via stdin to
-      # avoid shell quoting issues with large prompts.
+      # -s read-only is a REAL enforced read-only sandbox — the strongest guarantee
+      # of any counsel agent. It replaced --full-auto, which Codex removed in 0.147
+      # (that flag now errors out, silently costing you the whole review).
+      # Prompt is passed via stdin to avoid shell quoting issues with large prompts.
       # --skip-git-repo-check allows running in directories that aren't git repos
       # (e.g. monorepo subdirectories, non-git projects).
       # -c 'mcp_servers={}' strips MCP servers for this exec — counsel reviews
       # are self-contained, and CLAUDE.md-mandated MCP context-load (e.g. matt-os
       # getMattContext) burns tokens and can timeout the review.
-      run_with_timeout codex exec --full-auto --skip-git-repo-check -c 'mcp_servers={}' - < "$PROMPT_FILE" > "$output_file" 2> "$error_file" || true
+      run_with_timeout codex exec -s read-only --skip-git-repo-check -c 'mcp_servers={}' - < "$PROMPT_FILE" > "$output_file" 2> "$error_file" || true
       ;;
     antigravity)
       # Google Antigravity CLI (binary `agy`) — successor to Gemini CLI.
