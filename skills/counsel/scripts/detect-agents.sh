@@ -9,14 +9,22 @@
 
 set -euo pipefail
 
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=lib.sh
+. "$SCRIPT_DIR/lib.sh"
+
 # Registry: <agent-name>|<binary>|<version-command>
 AGENT_REGISTRY=(
   "codex|codex|codex --version"
   "antigravity|agy|agy --version"
   "gemini|gemini|gemini --version"
   "grok|grok|grok --version"
-  "claude|claude|echo skipped"
+  "claude|claude|command claude --version"
 )
+
+json_escape() {
+  python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"
+}
 
 detect_agent() {
   local name="$1"
@@ -26,20 +34,34 @@ detect_agent() {
   if command -v "$cmd" &>/dev/null; then
     local version
     version=$($version_cmd 2>/dev/null | head -1 || echo "unknown")
-    echo "\"$name\": {\"installed\": true, \"binary\": \"$cmd\", \"version\": \"$version\", \"path\": \"$(command -v "$cmd")\"}"
+    version=${version//$'\n'/ }
+    printf '"%s": {"installed": true, "binary": "%s", "version": %s, "path": %s' \
+      "$name" "$cmd" "$(json_escape "$version")" "$(json_escape "$(command -v "$cmd")")"
+    if [ "$name" = "claude" ]; then
+      local dir id first=1
+      printf ', "profiles": ['
+      while IFS= read -r dir; do
+        [ -z "$dir" ] && continue
+        id=$(counsel_claude_profile_id "$dir")
+        [ "$first" -eq 1 ] || printf ', '
+        first=0
+        printf '{"id": %s, "dir": %s}' "$(json_escape "$id")" "$(json_escape "$dir")"
+      done < <(counsel_detected_claude_dirs)
+      printf ']'
+    fi
+    printf '}'
+    echo
   else
     echo "\"$name\": {\"installed\": false, \"binary\": \"$cmd\"}"
   fi
 }
 
-# Detect each agent
 AGENTS=()
 for entry in "${AGENT_REGISTRY[@]}"; do
   IFS='|' read -r name binary version_cmd <<< "$entry"
   AGENTS+=("$(detect_agent "$name" "$binary" "$version_cmd")")
 done
 
-# Build JSON with proper comma handling
 echo "{"
 for i in "${!AGENTS[@]}"; do
   if [ "$i" -lt $(( ${#AGENTS[@]} - 1 )) ]; then

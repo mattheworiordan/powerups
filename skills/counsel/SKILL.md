@@ -1,7 +1,7 @@
 ---
 name: counsel
 description: Multi-agent review using local coding agents (Codex, Antigravity/Gemini, Grok CLI, Claude Code). Fan out review requests to multiple agents in parallel, then synthesize their findings. Use when you want a second (or third) opinion on code changes, plans, documents, or architecture decisions.
-version: 1.3.0
+version: 1.5.0
 allowed-tools: Read, Bash, Grep, Glob, Write, Task
 argument-hint: "[review topic or 'config']"
 ---
@@ -47,6 +47,14 @@ echo "COUNSEL_DIR=$COUNSEL_DIR"
 ```
 
 If empty, you can still run the Claude Code sub-agent review (step 5b). Tell the user external agents need the scripts directory.
+
+Then check whether profiles / effort still need a one-time ask:
+
+```bash
+bash "$COUNSEL_DIR/scripts/detect-setup.sh" --config ~/.config/counsel/config.json
+```
+
+If `.needs_setup` is true, jump to **Configuration** (it only asks what is missing), save, then continue. Do not ask on every run once `claude.chooser` and `effort.standard` + `effort.extra` exist. If `.claude_profiles.new` is non-empty, ask only about the new profile and merge it.
 
 ### 3. Gather Review Context
 
@@ -94,8 +102,13 @@ capability.
 bash "$COUNSEL_DIR/scripts/check-mcp-parity.sh"
 ```
 
-If `.parity` is `"mismatch"`, show the user each line of `.warnings` and ask
-before proceeding:
+Read `.parity`, `.warnings`, and `.optional_warnings`.
+
+- `.optional_warnings` are non-blocking (Antigravity remote MCP often fails
+  to connect). Tell the user. Do **not** wait. Antigravity still launches; the
+  script injects connected vs disconnected servers into its prompt.
+- If `.parity` is `"mismatch"`, show each line of `.warnings` and ask before
+  proceeding:
 
 ```
 ⚠️  MCP capability mismatch between review agents:
@@ -105,9 +118,10 @@ before proceeding:
 These agents will review with less context than the others. Proceed anyway? (yes/no)
 ```
 
-Wait for an explicit yes. If they'd rather fix it first, the warning text names the
-remedy (typically authenticating a server). If the script is missing or errors,
-skip this step silently — it's a quality check, not a gate.
+Wait for an explicit yes only on `.warnings`. Pass the same
+`--claude-config-dir` you will use in 5a (parity reads that profile). If the
+script is missing or errors, skip this step silently — it is a quality check,
+not a gate.
 
 ### 5. Fan Out to ALL Enabled Agents in Parallel
 
@@ -121,6 +135,19 @@ Detect the host agent first. Exclude the host from the CLI fan-out so it does no
 | Grok CLI | `grok` | spawn_subagent (read-only prompt) |
 | Codex / Antigravity / other | the host name if it is in the config | none — that agent is already in 5a via CLI, or skipped |
 
+`--exclude` accepts a **comma list** (and may be repeated): `--exclude grok` or
+`--exclude grok,antigravity`. From Grok, exclude `grok` only — Claude still
+runs as a CLI reviewer.
+
+**Pick Claude profile and effort before 5a** (do not prompt if already decided):
+
+- **Profile.** If `detect-setup.sh` reports 2+ profiles, apply `claude.chooser`
+  + each profile's `useWhen` to the review topic. Pass that dir as
+  `--claude-config-dir`. One profile → use it. None → omit the flag.
+- **Effort.** `standard` unless the user said extra / try hard / think hard /
+  deep / thorough (see `effort.phrases` in detect-setup). User-named models
+  (`fable`, `opus`) win over the tier.
+
 **5a. Launch external CLI agents** via the review script as a background Bash command:
 
 ```bash
@@ -130,10 +157,15 @@ bash "$COUNSEL_DIR/scripts/run-review.sh" \
   --config ~/.config/counsel/config.json \
   --prompt-file "$PROMPT_FILE" \
   --output-dir "$REVIEW_DIR" \
-  --exclude HOST
+  --exclude HOST \
+  --effort EFFORT \
+  --claude-config-dir PROFILE_DIR
 ```
 
-Replace `HOST` with `claude` or `grok` as in the table. Run this as a **background** Bash command (run_in_background=true).
+Replace `HOST`, `EFFORT` (`standard` or `extra`), and `PROFILE_DIR`. Omit
+`--claude-config-dir` when there is only one profile. Optional: `--add-dir PATH`
+(repeatable), `--dry-run` (writes `$REVIEW_DIR/*.cmd` without launching).
+Run 5a as a **background** Bash command (run_in_background=true).
 
 **5b. Launch the host's own reviewer** at the SAME TIME as 5a, with a read-only prompt:
 
@@ -223,20 +255,53 @@ Run this on first use or when the user says `/counsel config`.
 bash "$COUNSEL_DIR/scripts/detect-agents.sh"
 ```
 
-### Step 2: Ask User Which to Enable
+### Step 2: Ask only what is missing
 
-List the detected agents and ask which to enable:
+Run `detect-setup.sh` (and `detect-agents.sh` if agents are unset). Ask **only**
+the parts whose `needs_setup` is true.
+
+**Agents** (if no `agents` map yet):
 
 ```
-I detected the following agents: [list from Step 1]
-Claude Code (sub-agent) is always available.
-
-Which would you like to enable? Reply with the names, e.g. "codex, antigravity, grok" or "all".
+I detected: [list]. Which should Counsel enable? e.g. "codex, antigravity, grok" or "all".
 ```
+
+**Claude profiles** (if 2+ dirs and no `claude.chooser`, or `.claude_profiles.new`):
+
+```
+I found these Claude Code profiles:
+
+  • {id}  {dir}  ({email or "unknown account"})
+
+What is each one for, and when should Counsel use it for a review?
+I will save that as a chooser instruction and reuse it.
+```
+
+**Effort tiers** (if `effort.standard` or `effort.extra` is missing, or a
+tier still names sonnet/haiku):
+
+```bash
+bash "$COUNSEL_DIR/scripts/discover-models.sh"
+```
+
+Present `.suggestions` and each agent's `.available` list:
+
+```
+I listed the models each CLI currently exposes.
+
+  standard — {suggestions.standard}
+  extra    — {suggestions.extra}
+             (say "extra effort" / "try hard" on a later run)
+
+Claude reviews use opus or fable only — never sonnet/haiku.
+Use these recommendations, or name a model for each tier?
+```
+
+Do not invent product-specific profile names. Use the user's words.
 
 ### Step 3: Save Config
 
-Write to `~/.config/counsel/config.json`:
+Merge into `~/.config/counsel/config.json` (do not drop keys you did not ask about):
 
 ```json
 {
@@ -246,16 +311,26 @@ Write to `~/.config/counsel/config.json`:
     "gemini": { "enabled": true },
     "grok": { "enabled": true },
     "claude": { "enabled": true }
+  },
+  "claude": {
+    "chooser": "one short instruction: when to pick which profile",
+    "profiles": [
+      { "id": "work", "dir": "~/.claude-work", "useWhen": "…" },
+      { "id": "personal", "dir": "~/.claude-personal", "useWhen": "…" }
+    ]
+  },
+  "effort": {
+    "standard": { "claudeModel": "opus",  "codexEffort": "high",  "timeout": 300 },
+    "extra":    { "claudeModel": "fable", "codexEffort": "xhigh", "timeout": 600 }
   }
 }
 ```
 
-Agent names are stable config keys, not binary names — `antigravity` runs the
-`agy` binary. Leaving an agent enabled when its CLI isn't installed is harmless;
-it is skipped with a message. Keep both `antigravity` and `gemini` enabled if you
-work across machines that haven't all migrated.
+The `profiles` example ids are placeholders — use the ids `detect-setup.sh`
+reported. Agent names are stable config keys, not binary names (`antigravity`
+→ `agy`). An enabled agent whose CLI is missing is skipped.
 
-Then return to step 2 of the Execution Flow.
+Then return to step 3 of the Execution Flow.
 
 ---
 
@@ -265,15 +340,14 @@ All agents run read-only:
 
 | Agent | Invocation | Why It's Read-Only |
 |-------|-----------|-------------------|
-| Codex | `codex exec --full-auto - < prompt` | Non-interactive sandboxed execution. Prompt piped via stdin. `--full-auto` enables sandboxed auto-execution. |
-| Antigravity | `agy -p "prompt" --add-dir <repo>` from a throwaway workspace | Prompt-based restriction. Repo is added for reading; scratch output lands in the workspace, which is deleted. |
+| Codex | `codex exec --ignore-user-config -s read-only --output-last-message … - < prompt` | Sandbox is read-only. User MCP is stripped by default so the review finishes (`agents.codex.useUserConfig: true` to keep it). |
+| Antigravity | `agy -p "" --add-dir <repo>` from a throwaway workspace, prompt on stdin | Prompt-based restriction. Still runs when a remote MCP is down; the prompt lists connected servers. |
 | Grok | `grok --prompt-file … --sandbox read-only --yolo` | Kernel sandbox (read-only) plus write tools denied. `--yolo` auto-approves so a mandated MCP call cannot stall the run. |
-| Gemini *(retired)* | `gemini -p "prompt" --allowed-mcp-server-names none` | Non-interactive, MCP disabled, no auto-approval for tool calls. |
-| Claude Code | Task() sub-agent with read-only prompt | Prompt-based restriction. |
+| Gemini *(retired)* | `gemini -p "" … < prompt` | Non-interactive, MCP disabled, no auto-approval for tool calls. |
+| Claude Code | Host: Task() / spawn_subagent. CLI: `CLAUDE_CONFIG_DIR=<chosen profile> claude -p "" --model <tier> --permission-mode auto --add-dir <repo> < prompt` | Prompt-based restriction. Profile comes from `claude.chooser`. Prompt is stdin, never `claude -p "$(< file)"`. |
 
-**Strength of each guarantee, honestly.** None of these is a hard read-only mode.
-Codex's `--full-auto` is a *sandbox*, not a read-only flag — it can write within it.
-The Claude sub-agent is restricted by its prompt. Antigravity exposes no
+**Strength of each guarantee, honestly.** None of these is a hard read-only mode
+except Codex `-s read-only`. The Claude sub-agent is restricted by its prompt. Antigravity exposes no
 per-invocation read-only mode at all: `--mode plan` only steers tool selection, and
 permission `allow` rules in a workspace `.agents/settings.json` are ignored. So the
 real guarantee across all three is the prompt instruction plus each tool's sandbox.
@@ -293,7 +367,8 @@ stalls and returns an **empty** review. Allowing tool calls is what makes the ru
 ## Error Handling
 
 - Agent not installed: skip with message
-- Agent times out: skip with message (5-minute default timeout)
-- Agent errors: report error, continue with others
+- Agent times out: skip with a one-line reason (5-minute default timeout). Never paste the user prompt into the review file.
+- Agent errors: one-line reason from stderr (limit / auth / unexpected argument). Continue with others.
+- Antigravity MCP disconnected: still run Antigravity; note the caveat
 - No agents configured: tell user to run `/counsel config`
 - Script not found: fall back to Claude Code sub-agent only

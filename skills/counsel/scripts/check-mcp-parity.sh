@@ -10,23 +10,78 @@
 # configured and compares them. It hardcodes no server names, so it works for
 # anyone's setup, not just the author's.
 #
+# Claude: reads the profile run-review.sh will launch (override via
+# CLAUDE_CONFIG_DIR_OVERRIDE or config). Connector display names are
+# slugified so they compare with other agents' short ids.
+#
+# Antigravity: remote MCP often fails to connect. That is an optional
+# warning. The agent still runs; the review prompt lists connected servers.
+#
 # Output: JSON on stdout. Non-zero exit is NOT used for disagreement — read
-# `.parity` ("ok" | "mismatch") and `.warnings`.
+# `.parity` ("ok" | "mismatch") and `.warnings`. Optional skips land in
+# `.optional_warnings`.
 
 set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=lib.sh
+. "$SCRIPT_DIR/lib.sh"
+
+COUNSEL_CONFIG="${COUNSEL_CONFIG:-$HOME/.config/counsel/config.json}"
+CLAUDE_CONFIG_OVERRIDE="${CLAUDE_CONFIG_DIR_OVERRIDE:-}"
 
 # --- per-agent discovery -----------------------------------------------------
 # Each function prints one server name per line (empty if agent absent).
 
 servers_claude() {
-  # Claude Code keeps global MCP servers in ~/.claude.json
-  [ -f "$HOME/.claude.json" ] || return 0
-  python3 -c "
-import json,sys
-try: d=json.load(open('$HOME/.claude.json'))
-except Exception: sys.exit(0)
-for k in (d.get('mcpServers') or {}): print(k)
-" 2>/dev/null || true
+  local json settings
+  json=$(counsel_claude_json "$COUNSEL_CONFIG" "$CLAUDE_CONFIG_OVERRIDE")
+  [ -n "$json" ] && [ -f "$json" ] || return 0
+  settings="$(dirname "$json")/settings.json"
+  python3 - "$json" "$settings" "$SCRIPT_DIR/lib.sh" <<'PY'
+import json, os, re, subprocess, sys
+
+json_path, settings_path, lib = sys.argv[1], sys.argv[2], sys.argv[3]
+
+def normalize(name):
+    env = os.environ.copy()
+    # Reuse the shell helper so aliases live in one place.
+    out = subprocess.check_output(
+        ["bash", "-c", f'source "{lib}" && counsel_normalize_mcp_name "$1"', "_", name],
+        text=True,
+    )
+    return out.strip()
+
+try:
+    data = json.load(open(json_path))
+except Exception:
+    raise SystemExit(0)
+
+names = set()
+for k in (data.get("mcpServers") or {}):
+    n = normalize(k)
+    if n:
+        names.add(n)
+
+denied = set()
+if os.path.isfile(settings_path):
+    try:
+        settings = json.load(open(settings_path))
+    except Exception:
+        settings = {}
+    for item in (settings.get("deniedMcpServers") or []):
+        raw = item.get("serverName") if isinstance(item, dict) else item
+        if raw:
+            denied.add(normalize(str(raw)))
+
+for c in (data.get("claudeAiMcpEverConnected") or []):
+    n = normalize(str(c))
+    if n and n not in denied:
+        names.add(n)
+
+for n in sorted(names):
+    print(n)
+PY
 }
 
 servers_codex() {
@@ -37,7 +92,6 @@ servers_codex() {
 }
 
 servers_antigravity() {
-  # Antigravity: standalone mcp_config.json (global scope)
   local cfg="$HOME/.gemini/config/mcp_config.json"
   [ -f "$cfg" ] || return 0
   python3 -c "
@@ -49,9 +103,7 @@ for k in (d.get('mcpServers') or {}): print(k)
 }
 
 # Antigravity caches a directory of tool schemas per server it has actually
-# CONNECTED to. A server that is configured but missing here failed to come up —
-# usually an unauthenticated remote/OAuth server. This is a real connection
-# signal, not just config, so it catches the case config parsing cannot.
+# CONNECTED to. A server that is configured but missing here failed to come up.
 connected_antigravity() {
   local d="$HOME/.gemini/antigravity-cli/mcp"
   [ -d "$d" ] || return 0
@@ -59,7 +111,6 @@ connected_antigravity() {
 }
 
 servers_gemini() {
-  # Legacy Gemini CLI nested servers inside settings.json
   local cfg="$HOME/.gemini/settings.json"
   [ -f "$cfg" ] || return 0
   python3 -c "
@@ -71,32 +122,27 @@ for k in (d.get('mcpServers') or {}): print(k)
 }
 
 servers_grok() {
-  # Grok CLI: [mcp_servers.<name>] in ~/.grok/config.toml. Match only
-  # top-level entries — skip nested [mcp_servers.<name>.headers] / .env.
   [ -f "$HOME/.grok/config.toml" ] || return 0
   sed -nE 's/^\[mcp_servers\.([^].]+)\]$/\1/p' "$HOME/.grok/config.toml" 2>/dev/null | sort -u || true
-}
-
-agent_binary() {
-  case "$1" in
-    antigravity) echo "agy" ;;
-    *)           echo "$1" ;;
-  esac
 }
 
 # --- gather ------------------------------------------------------------------
 AGENTS="claude codex antigravity gemini grok"
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 
+CLAUDE_DIR=$(counsel_claude_config_dir "$COUNSEL_CONFIG" "$CLAUDE_CONFIG_OVERRIDE")
+CLAUDE_JSON=$(counsel_claude_json "$COUNSEL_CONFIG" "$CLAUDE_CONFIG_OVERRIDE")
+printf '%s\n' "$CLAUDE_DIR" > "$TMP/claude.config_dir"
+printf '%s\n' "${CLAUDE_JSON:-}" > "$TMP/claude.config_file"
+
 INSTALLED=()
 for a in $AGENTS; do
-  command -v "$(agent_binary "$a")" &>/dev/null || continue
+  command -v "$(counsel_agent_binary "$a")" &>/dev/null || continue
   INSTALLED+=("$a")
   "servers_$a" | sed '/^$/d' | sort -u > "$TMP/$a.configured"
   if [ "$a" = "antigravity" ]; then
     connected_antigravity | sed '/^$/d' | sort -u > "$TMP/$a.connected"
   else
-    # No connection signal available for other agents — assume configured==reachable
     cp "$TMP/$a.configured" "$TMP/$a.connected"
   fi
 done
@@ -104,17 +150,11 @@ done
 # Reference set = servers SHARED by at least two agents (or, with a single agent
 # installed, its own set). Deliberately not the union: agents accumulate private
 # utility servers (a REPL, a browser driver) that say nothing about review
-# quality, and warning about those trains the user to ignore the warning. A
-# server two agents share is a context source the third is genuinely missing.
+# quality, and warning about those trains the user to ignore the warning.
 : > "$TMP/all"
 for a in "${INSTALLED[@]:-}"; do
   [ -n "$a" ] && cat "$TMP/$a.configured" >> "$TMP/all"
 done
-# With three or more agents, "shared by >=2" separates real context servers from
-# one-off utilities. With only two, that test is degenerate — a server one agent
-# lacks appears exactly once and would be filtered out, so NO gap could ever be
-# reported. Fall back to the union there: a difference between two agents is more
-# likely material than not, and a dismissable warning beats silent blindness.
 if [ "${#INSTALLED[@]}" -ge 3 ]; then
   sort "$TMP/all" | uniq -d | sort -u > "$TMP/reference"
 else
@@ -134,8 +174,12 @@ def read(p):
     except OSError:
         return []
 
+def read1(p):
+    lines = read(p)
+    return lines[0] if lines else ""
+
 reference = read(os.path.join(tmp, "reference"))
-out, warnings = {}, []
+out, warnings, optional = {}, [], []
 
 for a in agents:
     configured = read(os.path.join(tmp, f"{a}.configured"))
@@ -149,12 +193,18 @@ for a in agents:
         "configured_but_not_connected": unreachable,
     }
     for s in unreachable:
-        warnings.append(
+        text = (
             f"{a}: MCP server '{s}' is configured but did not connect — "
             f"it likely needs authenticating (run `agy` then /mcp)."
             if a == "antigravity" else
             f"{a}: MCP server '{s}' is configured but did not connect."
         )
+        if a == "antigravity":
+            optional.append(
+                text + " Antigravity still runs; the prompt lists connected servers only."
+            )
+        else:
+            warnings.append(text)
     for s in missing:
         if s not in unreachable:
             warnings.append(
@@ -162,10 +212,26 @@ for a in agents:
                 f"its review will be less informed."
             )
 
+claude_dir = read1(os.path.join(tmp, "claude.config_dir"))
+claude_json = read1(os.path.join(tmp, "claude.config_file"))
+base = os.path.basename(claude_dir.rstrip("/"))
+if base == ".claude":
+    profile = "default"
+elif base.startswith(".claude-"):
+    profile = base[len(".claude-"):]
+else:
+    profile = base or "default"
+
 print(json.dumps({
     "reference_servers": reference,
     "agents": out,
     "parity": "ok" if not warnings else "mismatch",
     "warnings": warnings,
+    "optional_warnings": optional,
+    "claude_launch": {
+        "profile": profile,
+        "config_dir": claude_dir,
+        "config_file": claude_json,
+    },
 }, indent=2))
 PY

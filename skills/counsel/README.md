@@ -26,7 +26,7 @@ Single-agent reviews miss things. Different AI agents have different strengths, 
 | [Antigravity CLI](https://antigravity.google/product/antigravity-cli) (`agy`) | Headless, from a throwaway workspace with the repo added for reading (read-only by prompt) |
 | [Gemini CLI](https://github.com/google-gemini/gemini-cli) *(retired)* | Non-interactive, MCP disabled, no auto-approval (read-only) |
 | [Grok CLI](https://x.ai/news/grok-build-cli) | Headless `grok --prompt-file` with `--sandbox read-only` |
-| [Claude Code](https://code.claude.com) | Sub-agent (via Task tool) or CLI (`claude -p`) |
+| [Claude Code](https://code.claude.com) | Sub-agent (via Task tool) or CLI (`CLAUDE_CONFIG_DIR=<profile> claude -p "" < prompt`) |
 
 > **Gemini CLI is retired.** Google stopped serving it for free, Google AI Pro, Ultra
 > and individual Code Assist accounts on [18 June 2026](https://developers.google.com/gemini-code-assist/docs/deprecations/code-assist-individuals);
@@ -69,8 +69,9 @@ Counsel is included with the powerups plugin:
 
 On first use, Counsel detects which agents are installed and walks you through setup:
 
-1. **Detection** — Scans for installed agent CLIs (codex, antigravity, gemini, grok, claude)
-2. **Selection** — Choose which agents to enable
+1. **Agents** — which CLIs to enable
+2. **Claude profiles** — if more than one `~/.claude*` exists, what each is for and when to use it
+3. **Effort** — `standard` vs `extra` (say "try hard" / "extra effort" on a later run). First run lists live CLI models; Claude is opus or fable only.
 
 Configuration is saved to `~/.config/counsel/config.json`. Override per-project with `.counsel/config.json`.
 
@@ -105,7 +106,7 @@ Counsel works from any host agent:
 | Running From | How the host reviews | How the other agents review |
 |-------------|----------------------|-----------------------------|
 | **Claude Code** | Task() sub-agent (richest review — can explore beyond the diff) | CLI processes via `run-review.sh` (includes Grok) |
-| **Grok CLI** | spawn_subagent (read-only prompt) | CLI processes via `run-review.sh` (includes `claude -p`) |
+| **Grok CLI** | spawn_subagent (read-only prompt) | CLI processes via `run-review.sh` (includes `claude -p ""` on stdin) |
 | **Codex** | already in the CLI fan-out | CLI processes via `run-review.sh` |
 | **Antigravity** | already in the CLI fan-out | CLI processes via `run-review.sh` |
 
@@ -116,6 +117,7 @@ When running from Claude Code, the Claude review uses a sub-agent (via the Task 
 ## Tips
 
 - `codex review --uncommitted` is particularly effective — it has a purpose-built review mode
-- Counsel checks **MCP parity** before fanning out — if one agent can't reach a server the others have, you're warned before spending a review on it
+- Counsel checks **MCP parity** before fanning out. Antigravity still runs when a remote MCP is down; the prompt lists which servers connected.
+- Claude CLI uses the profile chosen from your saved `claude.chooser` instruction. Pass `--exclude grok,antigravity` to skip more than one agent. `--effort extra` is "try hard".
 - Claude Code sub-agent provides the richest review (full tool access to explore beyond the diff)
 - The value comes from **diversity** — enable as many agents as you have installed

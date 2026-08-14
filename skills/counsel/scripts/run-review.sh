@@ -1,18 +1,25 @@
 #!/usr/bin/env bash
 # Orchestrate parallel agent reviews (external CLI agents only)
 # When running from Claude Code, pass --exclude claude (it uses Task() sub-agent instead)
+# When running from Grok, pass --exclude grok (it uses spawn_subagent instead)
 #
 # All agents run in READ-ONLY mode — no writes, no state changes.
 #
-# Usage: run-review.sh --config <config-file> --prompt-file <prompt-file> --output-dir <output-dir>
+# Usage: run-review.sh --config <file> --prompt-file <file> --output-dir <dir>
+#          [--agents a,b] [--exclude a,b] [--timeout SECONDS]
+#          [--model MODEL] [--claude-model MODEL] [--codex-model MODEL]
+#          [--effort standard|extra] [--codex-effort LEVEL]
+#          [--claude-config-dir DIR] [--add-dir DIR] [--dry-run]
 
 set -euo pipefail
 
-# Initialize arrays before trap (prevents bash 3.x set -u errors if signal arrives early)
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=lib.sh
+. "$SCRIPT_DIR/lib.sh"
+
 PIDS=()
 AGENTS=()
 
-# Clean up background processes on exit/interrupt
 cleanup() {
   if [ ${#PIDS[@]} -gt 0 ]; then
     for pid in "${PIDS[@]}"; do
@@ -22,15 +29,21 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# Parse arguments
 CONFIG_FILE=""
 PROMPT_FILE=""
 OUTPUT_DIR=""
-TIMEOUT=300  # 5 minutes default
-EXCLUDE_AGENT=""
-ONLY_AGENTS=""  # comma-separated list of agents to run (empty = all enabled)
+TIMEOUT=300
+EXCLUDE_AGENTS=""
+ONLY_AGENTS=""
+CLAUDE_MODEL=""
+CODEX_MODEL=""
+CODEX_EFFORT=""
+EFFORT="standard"
+TIMEOUT_SET=0
+CLAUDE_CONFIG_OVERRIDE=""
+DRY_RUN=0
+ADD_DIRS=()
 
-# Helper: assert that the current option has a value argument
 require_value() {
   if [ $# -lt 2 ]; then
     echo "Error: $1 requires a value" >&2
@@ -38,20 +51,44 @@ require_value() {
   fi
 }
 
+usage() {
+  echo "Usage: run-review.sh --config <file> --prompt-file <file> --output-dir <dir>" >&2
+  echo "         [--agents a,b] [--exclude a,b] [--timeout SECONDS]" >&2
+  echo "         [--model MODEL] [--claude-model MODEL] [--codex-model MODEL]" >&2
+  echo "         [--effort standard|extra] [--codex-effort LEVEL]" >&2
+  echo "         [--claude-config-dir DIR] [--add-dir DIR] [--dry-run]" >&2
+}
+
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --config)      require_value "$@"; CONFIG_FILE="$2"; shift 2 ;;
-    --prompt-file) require_value "$@"; PROMPT_FILE="$2"; shift 2 ;;
-    --output-dir)  require_value "$@"; OUTPUT_DIR="$2"; shift 2 ;;
-    --timeout)     require_value "$@"; TIMEOUT="$2"; shift 2 ;;
-    --exclude)     require_value "$@"; EXCLUDE_AGENT="$2"; shift 2 ;;
-    --agents)      require_value "$@"; ONLY_AGENTS="$2"; shift 2 ;;
-    *) echo "Unknown option: $1" >&2; exit 1 ;;
+    --config)             require_value "$@"; CONFIG_FILE="$2"; shift 2 ;;
+    --prompt-file)        require_value "$@"; PROMPT_FILE="$2"; shift 2 ;;
+    --output-dir)         require_value "$@"; OUTPUT_DIR="$2"; shift 2 ;;
+    --timeout)            require_value "$@"; TIMEOUT="$2"; TIMEOUT_SET=1; shift 2 ;;
+    --effort)             require_value "$@"; EFFORT="$2"; shift 2 ;;
+    --codex-effort)       require_value "$@"; CODEX_EFFORT="$2"; shift 2 ;;
+    --exclude)
+      require_value "$@"
+      if [ -n "$EXCLUDE_AGENTS" ]; then
+        EXCLUDE_AGENTS="${EXCLUDE_AGENTS},$2"
+      else
+        EXCLUDE_AGENTS="$2"
+      fi
+      shift 2
+      ;;
+    --agents)             require_value "$@"; ONLY_AGENTS="$2"; shift 2 ;;
+    --model|--claude-model) require_value "$@"; CLAUDE_MODEL="$2"; shift 2 ;;
+    --codex-model)        require_value "$@"; CODEX_MODEL="$2"; shift 2 ;;
+    --claude-config-dir)  require_value "$@"; CLAUDE_CONFIG_OVERRIDE="$2"; shift 2 ;;
+    --add-dir)            require_value "$@"; ADD_DIRS+=("$2"); shift 2 ;;
+    --dry-run)            DRY_RUN=1; shift ;;
+    -h|--help)            usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
   esac
 done
 
 if [ -z "$CONFIG_FILE" ] || [ -z "$PROMPT_FILE" ] || [ -z "$OUTPUT_DIR" ]; then
-  echo "Usage: run-review.sh --config <file> --prompt-file <file> --output-dir <dir> [--agents codex,antigravity]" >&2
+  usage
   exit 1
 fi
 
@@ -60,11 +97,56 @@ fi
 
 mkdir -p "$OUTPUT_DIR"
 
-# The directory under review — captured before any agent changes directory.
+# Directory under review — captured before any agent changes directory.
 REPO_DIR="$PWD"
+LAUNCH_DIR="$OUTPUT_DIR/.launch"
+mkdir -p "$LAUNCH_DIR"
 
-# macOS doesn't have `timeout` — use gtimeout from coreutils if available, otherwise fallback
+# Drop extra-CA env whose file is missing (relative dummy certs from a repo cwd).
+for _v in SSL_CERT_FILE SSL_CERT_DIR NODE_EXTRA_CA_CERTS REQUESTS_CA_BUNDLE CURL_CA_BUNDLE; do
+  eval "_val=\${${_v}-}"
+  [ -z "$_val" ] && continue
+  if [ ! -e "$_val" ]; then
+    unset "$_v"
+  fi
+done
+unset _v _val
+
+CLAUDE_CONFIG_DIR_RESOLVED=$(counsel_claude_config_dir "$CONFIG_FILE" "$CLAUDE_CONFIG_OVERRIDE")
+CLAUDE_BIN=$(command -v claude || true)
+
+if [ -z "$CLAUDE_MODEL" ]; then
+  CLAUDE_MODEL=$(counsel_json_get "$CONFIG_FILE" "effort.${EFFORT}.claudeModel")
+fi
+if [ -z "$CLAUDE_MODEL" ]; then
+  CLAUDE_MODEL=$(counsel_json_get "$CONFIG_FILE" agents.claude.model)
+fi
+if [ -z "$CODEX_MODEL" ]; then
+  CODEX_MODEL=$(counsel_json_get "$CONFIG_FILE" "effort.${EFFORT}.codexModel")
+fi
+if [ -z "$CODEX_MODEL" ]; then
+  CODEX_MODEL=$(counsel_json_get "$CONFIG_FILE" agents.codex.model)
+fi
+if [ -z "$CODEX_MODEL" ] && [ -f "${HOME}/.codex/config.toml" ]; then
+  CODEX_MODEL=$(sed -n 's/^model *= *"\(.*\)"/\1/p' "${HOME}/.codex/config.toml" | head -1)
+fi
+if [ -z "$CODEX_EFFORT" ]; then
+  CODEX_EFFORT=$(counsel_json_get "$CONFIG_FILE" "effort.${EFFORT}.codexEffort")
+fi
+[ -z "$CODEX_EFFORT" ] && CODEX_EFFORT="high"
+GROK_MODEL=$(counsel_json_get "$CONFIG_FILE" "effort.${EFFORT}.grokModel")
+GROK_EFFORT=$(counsel_json_get "$CONFIG_FILE" "effort.${EFFORT}.grokEffort")
+AGY_MODEL=$(counsel_json_get "$CONFIG_FILE" "effort.${EFFORT}.agyModel")
+if [ "$TIMEOUT_SET" -eq 0 ]; then
+  _t=$(counsel_json_get "$CONFIG_FILE" "effort.${EFFORT}.timeout")
+  [ -n "$_t" ] && TIMEOUT="$_t"
+  unset _t
+fi
+USE_USER_CONFIG=$(counsel_json_get "$CONFIG_FILE" agents.codex.useUserConfig)
+[ -z "$USE_USER_CONFIG" ] && USE_USER_CONFIG="false"
+
 TIMEOUT_CMD="timeout"
+TIMEOUT_KILL_ARGS=()
 if ! command -v timeout &>/dev/null; then
   if command -v gtimeout &>/dev/null; then
     TIMEOUT_CMD="gtimeout"
@@ -73,66 +155,18 @@ if ! command -v timeout &>/dev/null; then
     echo "Warning: neither 'timeout' nor 'gtimeout' found — agents will run without time limits." >&2
   fi
 fi
+if [ -n "$TIMEOUT_CMD" ] && "$TIMEOUT_CMD" --help 2>&1 | grep -q -- '--kill-after'; then
+  # Codex can ignore SIGTERM and keep writing a 500KB transcript.
+  TIMEOUT_KILL_ARGS=(--signal=TERM --kill-after=15s)
+fi
 
 run_with_timeout() {
   if [ -n "$TIMEOUT_CMD" ]; then
-    "$TIMEOUT_CMD" "$TIMEOUT" "$@"
+    "$TIMEOUT_CMD" "${TIMEOUT_KILL_ARGS[@]}" "$TIMEOUT" "$@"
   else
     "$@"
   fi
 }
-
-# Map an agent name to the binary that implements it. These differ: Google's
-# Antigravity CLI installs as `agy`, not `antigravity`.
-agent_binary() {
-  case "$1" in
-    antigravity) echo "agy" ;;
-    *)           echo "$1" ;;
-  esac
-}
-
-# Antigravity invocation strategy — verified 2026-07-31.
-#
-# `agy` runs from a throwaway workspace with the repo added read-only via
-# --add-dir, so it can explore the codebase like the other agents while its own
-# scratch output lands in a directory we delete.
-#
-# Read-only is enforced at the PROMPT level here, exactly as it is for Codex
-# (`--full-auto` is a sandbox, not a read-only mode) and for the Claude
-# sub-agent. Antigravity exposes no per-invocation read-only mode: --mode plan
-# only steers tool selection, and permission `allow` rules in a workspace
-# .agents/settings.json are ignored. Dropping --add-dir restores hard
-# containment (the repo leaves scope entirely) at the cost of a much weaker
-# review — that trade was made deliberately in favour of comparable agents.
-#
-# Tried and does NOT work — do not "fix" this back:
-#   * Throwaway $HOME + permissions.deny write_file(*): auth is bound to the real
-#     HOME, so the run dies with "authentication required". Copying
-#     jetski_state.pbtxt / installation_id into the fake HOME does not help.
-#   * Workspace .agents/settings.json permission rules: `allow` entries are NOT
-#     honoured there — mcp(*) and even an exact mcp(matt-os/getMattContext)
-#     target still get auto-denied.
-#   * Workspace .agents/mcp_config.json with empty mcpServers: does not override
-#     the global ~/.gemini/config/mcp_config.json.
-#
-# Why --dangerously-skip-permissions is correct HERE and only here: the user's
-# global ~/.gemini/GEMINI.md mandates an MCP getMattContext call as the agent's
-# first action. Headless mode cannot approve it interactively, so it is
-# auto-denied — and the agent then STALLS and returns an EMPTY review. Allowing
-# tool calls lets the run complete. The repo stays safe because it is outside the
-# workspace, not because of a permission rule.
-
-# `agy` starts a child process for every configured stdio MCP server, places them
-# in their OWN process group, and does not reap them when it exits. Every review
-# would leave one orphaned server per configured server running indefinitely.
-# They accumulate until agy's own /mcp reload fails with "failed to stop existing
-# instances", because some MCP servers ignore SIGTERM and never die.
-#
-# Killing agy's process group does not reach them (different group), so match on
-# the server commands agy is actually configured to run, and only kill processes
-# that (a) appeared during our run and (b) have been orphaned to PPID 1. Both
-# conditions are required so we never touch an MCP server belonging to the user's
-# editor or another agent — those keep a real parent.
 
 # Print a pgrep pattern for each configured stdio MCP server.
 agy_mcp_patterns() {
@@ -143,10 +177,8 @@ import json,sys
 try: d=json.load(open('$cfg'))
 except Exception: sys.exit(0)
 for s in (d.get('mcpServers') or {}).values():
-    if not s.get('command'): continue      # remote server, no local process
+    if not s.get('command'): continue
     args = s.get('args') or []
-    # Prefer the first arg (usually a distinctive script path) over the launcher,
-    # which is often a shared wrapper like node or a shim.
     print(args[0] if args else s['command'])
 " 2>/dev/null || true
 }
@@ -165,101 +197,271 @@ reap_agy_mcp_orphans() {
   while IFS= read -r pat; do
     [ -n "$pat" ] || continue
     for pid in $(pgrep -f "$pat" 2>/dev/null || true); do
-      grep -qx "$pid" "$before" && continue          # pre-existing, not ours
+      grep -qx "$pid" "$before" && continue
       ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-      [ "$ppid" = "1" ] || continue                  # still parented, leave alone
+      [ "$ppid" = "1" ] || continue
       kill -9 "$pid" 2>/dev/null || true
     done
   done < <(agy_mcp_patterns)
 }
 
-# Run a single agent review (always read-only)
+write_plan() {
+  local agent="$1"
+  shift
+  {
+    printf 'cwd=%q\n' "$PWD"
+    if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+      printf 'CLAUDE_CONFIG_DIR=%q\n' "$CLAUDE_CONFIG_DIR"
+    fi
+    printf 'prompt_file=%q\n' "$PROMPT_FILE"
+    printf 'stdin=prompt-file\n'
+    printf 'argv='
+    printf '%q ' "$@"
+    printf '\n'
+  } > "$OUTPUT_DIR/$agent.cmd"
+}
+
+# Short failure into $agent.md — never dump the user prompt.
+write_failure() {
+  local agent="$1" rc="$2" error_file="$3" output_file="$4"
+  local msg="" line
+
+  if [ "$rc" = 124 ] || [ "$rc" = 137 ]; then
+    msg="timed out after ${TIMEOUT}s (no final review). Session log: ${agent}.err"
+  else
+    if [ -s "$error_file" ]; then
+      line=$(grep -E -m1 -i '^(error:|Error:|ERROR |You.ve hit|authentication required|unexpected argument)' "$error_file" || true)
+      if [ -z "$line" ]; then
+        line=$(grep -E -m1 -i 'weekly limit|rate limit|permission denied|authentication required' "$error_file" || true)
+      fi
+      if [ -n "$line" ]; then
+        msg=$(printf '%s' "$line" | tr '\n' ' ' | cut -c1-240)
+      fi
+    fi
+    if [ -z "$msg" ]; then
+      if [ "$rc" != 0 ]; then
+        msg="exited ${rc} with no review. See ${agent}.err"
+      else
+        msg="produced no review. See ${agent}.err"
+      fi
+    fi
+  fi
+  printf 'Skipped/failed: %s — %s\n' "$agent" "$msg" > "$output_file"
+}
+
+# True when $1 looks like a real review, not a CLI usage dump or the prompt echoed back.
+looks_like_review() {
+  local f="$1"
+  [ -s "$f" ] || return 1
+  if grep -qE '^(Usage: (claude|codex|agy|grok|gemini)|Error: Input must be provided either through stdin|unexpected argument|Skipped/failed:)' "$f"; then
+    return 1
+  fi
+  if grep -q "You.ve hit your weekly limit" "$f"; then
+    return 1
+  fi
+  if [ -s "$PROMPT_FILE" ]; then
+    local first oc pc
+    first=$(head -n 1 "$PROMPT_FILE")
+    if [ ${#first} -gt 24 ] && grep -qF "$first" "$f"; then
+      oc=$(wc -c < "$f")
+      pc=$(wc -c < "$PROMPT_FILE")
+      if [ "$pc" -gt 80 ] && [ "$oc" -ge $((pc * 8 / 10)) ]; then
+        return 1
+      fi
+    fi
+  fi
+  return 0
+}
+
+finalize_output() {
+  local agent="$1" rc="$2"
+  local output_file="$OUTPUT_DIR/$agent.md"
+  local error_file="$OUTPUT_DIR/$agent.err"
+
+  if looks_like_review "$output_file"; then
+    return 0
+  fi
+  write_failure "$agent" "$rc" "$error_file" "$output_file"
+}
+
+# Run a single agent review (always read-only).
 # $1 = agent name
 run_agent() {
   local agent="$1"
   local output_file="$OUTPUT_DIR/$agent.md"
   local error_file="$OUTPUT_DIR/$agent.err"
+  local rc=0
+
+  : > "$error_file"
+  : > "$output_file"
 
   case "$agent" in
     codex)
-      # Use `codex exec` for custom prompt reviews (non-interactive, sandboxed).
-      # -s read-only is a REAL enforced read-only sandbox — the strongest guarantee
-      # of any counsel agent. It replaced --full-auto, which Codex removed in 0.147
-      # (that flag now errors out, silently costing you the whole review).
-      # Prompt is passed via stdin to avoid shell quoting issues with large prompts.
-      # --skip-git-repo-check allows running in directories that aren't git repos
-      # (e.g. monorepo subdirectories, non-git projects).
-      # -c 'mcp_servers={}' strips MCP servers for this exec — counsel reviews
-      # are self-contained, and CLAUDE.md-mandated MCP context-load (e.g. matt-os
-      # getMattContext) burns tokens and can timeout the review.
-      run_with_timeout codex exec -s read-only --skip-git-repo-check -c 'mcp_servers={}' - < "$PROMPT_FILE" > "$output_file" 2> "$error_file" || true
+      # `codex exec --full-auto` was removed in 0.147 (errors out).
+      # -s read-only is enforced. Default --ignore-user-config drops the user's
+      # MCP servers; -c mcp_servers={} MERGES and does not clear them.
+      # --output-last-message writes the review; stdout/stderr is the session log.
+      # Prompt via stdin (the trailing `-`), never as a quoted argv blob.
+      local codex_cmd=(
+        codex exec
+        --ephemeral
+        --color never
+        --output-last-message "$output_file"
+        -s read-only
+        --skip-git-repo-check
+        -c "model_reasoning_effort=\"${CODEX_EFFORT}\""
+      )
+      if [ "$USE_USER_CONFIG" != "true" ]; then
+        codex_cmd+=(--ignore-user-config)
+      fi
+      if [ -n "$CODEX_MODEL" ]; then
+        codex_cmd+=(-m "$CODEX_MODEL")
+      fi
+      codex_cmd+=(-)
+      if [ "$DRY_RUN" -eq 1 ]; then
+        ( cd "$REPO_DIR" && write_plan "$agent" "${codex_cmd[@]}" )
+        echo "dry-run: would launch $agent (see ${agent}.cmd)" > "$output_file"
+        return 0
+      fi
+      ( cd "$REPO_DIR" && run_with_timeout "${codex_cmd[@]}" < "$PROMPT_FILE" > "$OUTPUT_DIR/$agent.stdout" 2> "$error_file" ) || rc=$?
+      if [ -s "$OUTPUT_DIR/$agent.stdout" ]; then
+        cat "$OUTPUT_DIR/$agent.stdout" >> "$error_file"
+      fi
       ;;
+
     antigravity)
-      # Google Antigravity CLI (binary `agy`) — successor to Gemini CLI.
-      # Runs in a throwaway workspace (see the strategy note above); the prompt
-      # file carries all review context, so the agent never needs the repo.
-      # --disable-slash-commands stops the prompt expanding skills mid-review.
-      # agy's own print-timeout is set just under ours so it exits cleanly with a
-      # partial answer instead of being SIGTERMed (its default is 5m regardless).
-      # --add-dir grants READ access to the repo so this agent can explore beyond
-      # the diff, matching what Codex (repo cwd) and the Claude sub-agent can do.
-      # Without it the review is materially weaker — it sees only the prompt.
-      # cwd stays the throwaway workspace so incidental scratch files land there.
+      # Google Antigravity CLI (binary `agy`). Throwaway workspace + --add-dir
+      # so it can read the repo. See the strategy note in git history: do not
+      # "fix" this back to a fake HOME or workspace permission files.
+      # Prompt via stdin (`-p ""`) — `agy -p "$(< file)"` hits ARG_MAX the same
+      # way `claude -p "$(< file)"` does.
+      # Remote MCP often fails to connect. Still launch. Prepend connected vs
+      # disconnected servers so the agent does not stall on a dead server.
       local agy_ws="$OUTPUT_DIR/.agy-ws-$agent"
       local agy_pt=$(( TIMEOUT > 30 ? TIMEOUT - 15 : TIMEOUT ))
       local agy_before="$OUTPUT_DIR/.agy-mcp-pids-$agent"
+      local agy_prompt="$PROMPT_FILE"
+      local agy_connected agy_missing
+      agy_connected=$(counsel_antigravity_connected | paste -sd, -)
+      agy_missing=$(counsel_antigravity_disconnected | paste -sd, -)
+      if [ -n "$agy_missing" ] || [ -n "$agy_connected" ]; then
+        agy_prompt="$OUTPUT_DIR/.agy-prompt.md"
+        {
+          echo "MCP availability for this agent (Antigravity remote servers often fail to connect):"
+          echo "Connected: ${agy_connected:-none}"
+          echo "Configured but not connected: ${agy_missing:-none}"
+          echo "Do not call disconnected servers. Review with the prompt and connected tools only."
+          echo
+          echo "---"
+          echo
+          cat "$PROMPT_FILE"
+        } > "$agy_prompt"
+      fi
+      local agy_cmd=(
+        agy
+        -p ""
+        --add-dir "$REPO_DIR"
+        --dangerously-skip-permissions
+        --disable-slash-commands
+        --print-timeout "${agy_pt}s"
+      )
+      if [ -n "$AGY_MODEL" ]; then
+        agy_cmd+=(--model "$AGY_MODEL")
+      fi
+      if [ "$DRY_RUN" -eq 1 ]; then
+        write_plan "$agent" "${agy_cmd[@]}"
+        echo "dry-run: would launch $agent (see ${agent}.cmd)" > "$output_file"
+        [ -n "$agy_missing" ] && echo "  MCP not connected: $agy_missing (still launching)" >> "$output_file"
+        return 0
+      fi
       mkdir -p "$agy_ws"
       snapshot_agy_mcp_pids > "$agy_before"
-      ( cd "$agy_ws" && run_with_timeout agy \
-          -p "$(< "$PROMPT_FILE")" \
-          --add-dir "$REPO_DIR" \
-          --dangerously-skip-permissions \
-          --disable-slash-commands \
-          --print-timeout "${agy_pt}s" \
-      ) > "$output_file" 2> "$error_file" || true
+      ( cd "$agy_ws" && run_with_timeout "${agy_cmd[@]}" < "$agy_prompt" ) > "$output_file" 2> "$error_file" || rc=$?
       reap_agy_mcp_orphans "$agy_before"
       rm -f "$agy_before"
       rm -rf "$agy_ws"
       ;;
+
     grok)
-      # Grok CLI headless review. --prompt-file triggers non-interactive mode.
-      # --sandbox read-only blocks writes to the repo (kernel-enforced on macOS).
-      # --yolo auto-approves tool calls so a mandated getMattContext cannot stall
-      # the run the way Antigravity does without --dangerously-skip-permissions.
-      # --disallowed-tools removes the write tools even inside the sandbox.
-      run_with_timeout grok \
-        --prompt-file "$PROMPT_FILE" \
-        --sandbox read-only \
-        --yolo \
-        --disallowed-tools "search_replace,write" \
-        > "$output_file" 2> "$error_file" || true
+      local grok_cmd=(
+        grok
+        --prompt-file "$PROMPT_FILE"
+        --sandbox read-only
+        --yolo
+        --disallowed-tools "search_replace,write"
+      )
+      if [ -n "$GROK_MODEL" ]; then
+        grok_cmd+=(--model "$GROK_MODEL")
+      fi
+      if [ -n "$GROK_EFFORT" ]; then
+        grok_cmd+=(--reasoning-effort "$GROK_EFFORT")
+      fi
+      if [ "$DRY_RUN" -eq 1 ]; then
+        write_plan "$agent" "${grok_cmd[@]}"
+        echo "dry-run: would launch $agent (see ${agent}.cmd)" > "$output_file"
+        return 0
+      fi
+      ( cd "$REPO_DIR" && run_with_timeout "${grok_cmd[@]}" ) > "$output_file" 2> "$error_file" || rc=$?
       ;;
+
     gemini)
-      # LEGACY — Gemini CLI stopped serving personal/Pro/Ultra accounts on
-      # 2026-06-18 (enterprise Code Assist licences excepted). Kept so machines
-      # that still have a working install keep functioning; prefer antigravity.
-      # -p for non-interactive mode; --allowed-mcp-server-names none disables MCP
-      # servers (prevents off-script context pollution); without --yolo, Gemini cannot
-      # auto-approve tool calls so it's effectively read-only.
-      # --raw-output prevents output sanitization from truncating long responses.
-      # Prompt is piped via stdin and -p "" triggers headless mode — avoids shell
-      # ARG_MAX limits with large prompts.
-      run_with_timeout gemini -p "" --allowed-mcp-server-names none --raw-output --accept-raw-output-risk < "$PROMPT_FILE" > "$output_file" 2> "$error_file" || true
+      # LEGACY — Gemini CLI stopped serving personal accounts on 2026-06-18.
+      local gemini_cmd=(
+        gemini -p "" --allowed-mcp-server-names none --raw-output --accept-raw-output-risk
+      )
+      if [ "$DRY_RUN" -eq 1 ]; then
+        write_plan "$agent" "${gemini_cmd[@]}"
+        echo "dry-run: would launch $agent (see ${agent}.cmd)" > "$output_file"
+        return 0
+      fi
+      run_with_timeout "${gemini_cmd[@]}" < "$PROMPT_FILE" > "$output_file" 2> "$error_file" || rc=$?
       ;;
+
     claude)
-      # -p for non-interactive mode; prompt includes read-only instructions
-      run_with_timeout claude -p "$(< "$PROMPT_FILE")" > "$output_file" 2> "$error_file" || true
+      # CLAUDE_CONFIG_DIR is the chosen profile (host skill + --claude-config-dir).
+      # Never invoke a shell function named `claude` — use the resolved binary.
+      # Prompt via stdin: `claude -p "$(< file)"` fails with
+      # "Input must be provided either through stdin or as a prompt argument".
+      # Launch from a neutral cwd so repo-relative extra CA files are not read.
+      if [ -z "$CLAUDE_BIN" ]; then
+        echo "claude binary not found on PATH" > "$error_file"
+        finalize_output "$agent" 127
+        return 0
+      fi
+      local claude_cmd=(
+        "$CLAUDE_BIN"
+        -p ""
+        --permission-mode auto
+      )
+      if [ -n "$CLAUDE_MODEL" ]; then
+        claude_cmd+=(--model "$CLAUDE_MODEL")
+      fi
+      claude_cmd+=(--add-dir "$REPO_DIR")
+      local extra
+      for extra in "${ADD_DIRS[@]+"${ADD_DIRS[@]}"}"; do
+        claude_cmd+=(--add-dir "$extra")
+      done
+      claude_cmd+=(--disallowed-tools "Edit,Write,NotebookEdit")
+      if [ "$DRY_RUN" -eq 1 ]; then
+        CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_DIR_RESOLVED" write_plan "$agent" env CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_DIR_RESOLVED" "${claude_cmd[@]}"
+        echo "dry-run: would launch $agent (see ${agent}.cmd)" > "$output_file"
+        return 0
+      fi
+      (
+        cd "$LAUNCH_DIR"
+        CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_DIR_RESOLVED" \
+          run_with_timeout "${claude_cmd[@]}" < "$PROMPT_FILE"
+      ) > "$output_file" 2> "$error_file" || rc=$?
       ;;
+
     *)
       echo "Unknown agent: $agent" > "$error_file"
+      rc=1
       ;;
   esac
 
-  # Check if output is empty (agent likely failed)
-  if [ ! -s "$output_file" ] && [ -s "$error_file" ]; then
-    echo "Agent error:" > "$output_file"
-    head -20 "$error_file" >> "$output_file"
-  fi
+  finalize_output "$agent" "$rc"
+  return 0
 }
 
 # Extract enabled agents from config using jq (preferred) or python3 (fallback)
@@ -288,26 +490,35 @@ if [ -z "$ENABLED_AGENTS" ]; then
 fi
 
 echo "Counsel: Starting parallel reviews..." >&2
+echo "  Effort: $EFFORT" >&2
+echo "  Claude profile: $CLAUDE_CONFIG_DIR_RESOLVED" >&2
+[ -n "$CLAUDE_MODEL" ] && echo "  Claude model: $CLAUDE_MODEL" >&2
+echo "  Codex effort: $CODEX_EFFORT" >&2
+[ "$DRY_RUN" -eq 1 ] && echo "  Mode: dry-run" >&2
 
 while IFS= read -r agent_name; do
   [ -z "$agent_name" ] && continue
 
-  # Skip excluded agent (e.g., claude when running from Claude Code)
-  if [ -n "$EXCLUDE_AGENT" ] && [ "$agent_name" = "$EXCLUDE_AGENT" ]; then
+  if counsel_list_contains "$EXCLUDE_AGENTS" "$agent_name"; then
     echo "  Skipping $agent_name (handled by host agent)" >&2
     continue
   fi
 
-  # If --agents filter is set, only run agents in the list
-  if [ -n "$ONLY_AGENTS" ] && [[ ",$ONLY_AGENTS," != *",$agent_name,"* ]]; then
+  if [ -n "$ONLY_AGENTS" ] && ! counsel_list_contains "$ONLY_AGENTS" "$agent_name"; then
     continue
   fi
 
-  # Check if agent CLI exists (name != binary for some agents, e.g. antigravity → agy)
-  agent_bin=$(agent_binary "$agent_name")
+  agent_bin=$(counsel_agent_binary "$agent_name")
   if ! command -v "$agent_bin" &>/dev/null; then
     echo "  Skipping $agent_name ($agent_bin not installed)" >&2
     continue
+  fi
+
+  if [ "$agent_name" = "antigravity" ]; then
+    agy_missing=$(counsel_antigravity_disconnected | paste -sd, -)
+    if [ -n "$agy_missing" ]; then
+      echo "  antigravity: MCP not connected (${agy_missing}); launching anyway" >&2
+    fi
   fi
 
   echo "  Starting $agent_name (read-only)..." >&2
@@ -317,7 +528,6 @@ while IFS= read -r agent_name; do
   AGENTS+=("$agent_name")
 done <<< "$ENABLED_AGENTS"
 
-# Wait for all agents
 if [ ${#PIDS[@]} -gt 0 ]; then
   echo "  Waiting for ${#PIDS[@]} agent(s)..." >&2
   RESULTS=()
@@ -325,11 +535,11 @@ if [ ${#PIDS[@]} -gt 0 ]; then
     wait "${PIDS[$i]}" 2>/dev/null || true
     agent="${AGENTS[$i]}"
     output_file="$OUTPUT_DIR/$agent.md"
-    if [ -s "$output_file" ]; then
+    if looks_like_review "$output_file"; then
       RESULTS+=("$agent")
       echo "  $agent: done" >&2
     else
-      echo "  $agent: no output" >&2
+      echo "  $agent: no review" >&2
     fi
   done
 else
@@ -337,16 +547,16 @@ else
   RESULTS=()
 fi
 
-# Report results
 echo "" >&2
 echo "Reviews complete. ${#RESULTS[@]}/${#AGENTS[@]} agents responded." >&2
 echo "Output directory: $OUTPUT_DIR" >&2
 
-# Output results as JSON
 echo "{"
 echo "  \"output_dir\": \"$OUTPUT_DIR\","
 echo "  \"agents_requested\": ${#AGENTS[@]},"
 echo "  \"agents_responded\": ${#RESULTS[@]},"
+echo "  \"effort\": \"$EFFORT\","
+echo "  \"claude_config_dir\": \"$CLAUDE_CONFIG_DIR_RESOLVED\","
 echo "  \"reviews\": ["
 for i in "${!RESULTS[@]}"; do
   [ "$i" -gt 0 ] && echo ","
