@@ -333,8 +333,15 @@ run_agent() {
       # Google Antigravity CLI (binary `agy`). Throwaway workspace + --add-dir
       # so it can read the repo. See the strategy note in git history: do not
       # "fix" this back to a fake HOME or workspace permission files.
-      # Prompt via stdin (`-p ""`) — `agy -p "$(< file)"` hits ARG_MAX the same
-      # way `claude -p "$(< file)"` does.
+      # Prompt is handed over as a FILE inside the throwaway workspace, and the
+      # -p argument just points at it. Two earlier approaches both fail:
+      #   * `-p ""` + prompt on stdin — agy exits with
+      #     "Error: empty prompt. Usage: agy --print \"your prompt here\"".
+      #     It does not read the prompt from stdin.
+      #   * bare stdin with no -p — agy starts an INTERACTIVE session and hangs.
+      # Passing the prompt inline (`-p "$(< file)"`) works but risks ARG_MAX
+      # (1MB on macOS) on a large diff. Reading a workspace file has no limit,
+      # and reads inside the workspace are auto-allowed.
       # Remote MCP often fails to connect. Still launch. Prepend connected vs
       # disconnected servers so the agent does not stall on a dead server.
       local agy_ws="$OUTPUT_DIR/.agy-ws-$agent"
@@ -359,7 +366,7 @@ run_agent() {
       fi
       local agy_cmd=(
         agy
-        -p ""
+        -p "Read the file ./REVIEW_PROMPT.md in your current working directory and follow its instructions exactly. Output only what it asks for. Do not mention the file itself."
         --add-dir "$REPO_DIR"
         --dangerously-skip-permissions
         --disable-slash-commands
@@ -375,8 +382,9 @@ run_agent() {
         return 0
       fi
       mkdir -p "$agy_ws"
+      cp "$agy_prompt" "$agy_ws/REVIEW_PROMPT.md"
       snapshot_agy_mcp_pids > "$agy_before"
-      ( cd "$agy_ws" && run_with_timeout "${agy_cmd[@]}" < "$agy_prompt" ) > "$output_file" 2> "$error_file" || rc=$?
+      ( cd "$agy_ws" && run_with_timeout "${agy_cmd[@]}" < /dev/null ) > "$output_file" 2> "$error_file" || rc=$?
       reap_agy_mcp_orphans "$agy_before"
       rm -f "$agy_before"
       rm -rf "$agy_ws"

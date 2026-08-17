@@ -57,11 +57,16 @@ try:
 except Exception:
     raise SystemExit(0)
 
-names = set()
-for k in (data.get("mcpServers") or {}):
+names = {}          # normalised name -> endpoint ("" when unknown)
+for k, v in (data.get("mcpServers") or {}).items():
     n = normalize(k)
-    if n:
-        names.add(n)
+    if not n:
+        continue
+    v = v if isinstance(v, dict) else {}
+    ep = v.get("url") or v.get("serverUrl") or v.get("httpUrl") or ""
+    if not ep and v.get("command"):
+        ep = " ".join([v["command"]] + list(v.get("args") or []))
+    names[n] = ep
 
 denied = set()
 if os.path.isfile(settings_path):
@@ -77,29 +82,86 @@ if os.path.isfile(settings_path):
 for c in (data.get("claudeAiMcpEverConnected") or []):
     n = normalize(str(c))
     if n and n not in denied:
-        names.add(n)
+        names.setdefault(n, "")   # a connector exposes no local endpoint
 
 for n in sorted(names):
-    print(n)
+    print(f"{n}\t{names[n]}")
+PY
+}
+
+# TOML agents (Codex, Grok): emit "<name>\t<endpoint>" per [mcp_servers.<name>]
+# section. Names may be quoted ("Ably OS") — strip the quotes, or the quotes end
+# up in the reported id. Endpoint is the url for a remote server, or command+args
+# for a stdio one.
+toml_servers_with_endpoints() {
+  local cfg="$1"
+  [ -f "$cfg" ] || return 0
+  python3 - "$cfg" <<'PY' 2>/dev/null || true
+import re, sys
+name = None
+endpoint = {}
+order = []
+for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
+    line = line.strip()
+    m = re.match(r'^\[mcp_servers\.("?)([^\]]+?)\1\]$', line)
+    if m:
+        name = m.group(2).strip('"')
+        if "." in name and not m.group(1):   # nested [mcp_servers.x.tools.y]
+            name = None
+            continue
+        order.append(name)
+        endpoint.setdefault(name, "")
+        continue
+    if name is None:
+        continue
+    if line.startswith("["):
+        name = None
+        continue
+    m = re.match(r'^(url|serverUrl)\s*=\s*"([^"]+)"', line)
+    if m and not endpoint[name]:
+        endpoint[name] = m.group(2)
+    m = re.match(r'^command\s*=\s*"([^"]+)"', line)
+    if m and not endpoint[name]:
+        endpoint[name] = m.group(1)
+    m = re.match(r'^args\s*=\s*\[(.*)\]', line)
+    if m:
+        args = re.findall(r'"([^"]+)"', m.group(1))
+        if args:
+            endpoint[name] = (endpoint[name] + " " + " ".join(args)).strip()
+seen = set()
+for n in order:
+    if n in seen:
+        continue
+    seen.add(n)
+    print(f"{n}\t{endpoint.get(n,'')}")
+PY
+}
+
+# JSON agents (Antigravity, legacy Gemini): same "<name>\t<endpoint>" shape.
+json_servers_with_endpoints() {
+  local cfg="$1"
+  [ -f "$cfg" ] || return 0
+  python3 - "$cfg" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    raise SystemExit(0)
+for k, v in (d.get("mcpServers") or {}).items():
+    v = v if isinstance(v, dict) else {}
+    ep = v.get("serverUrl") or v.get("url") or v.get("httpUrl") or ""
+    if not ep and v.get("command"):
+        ep = " ".join([v["command"]] + list(v.get("args") or []))
+    print(f"{k}\t{ep}")
 PY
 }
 
 servers_codex() {
-  # Codex uses config.toml with [mcp_servers.<name>] sections. Match only
-  # top-level entries — skip nested [mcp_servers.<name>.tools.<x>] / .env.
-  [ -f "$HOME/.codex/config.toml" ] || return 0
-  sed -nE 's/^\[mcp_servers\.([^].]+)\]$/\1/p' "$HOME/.codex/config.toml" 2>/dev/null | sort -u || true
+  toml_servers_with_endpoints "$HOME/.codex/config.toml"
 }
 
 servers_antigravity() {
-  local cfg="$HOME/.gemini/config/mcp_config.json"
-  [ -f "$cfg" ] || return 0
-  python3 -c "
-import json,sys
-try: d=json.load(open('$cfg'))
-except Exception: sys.exit(0)
-for k in (d.get('mcpServers') or {}): print(k)
-" 2>/dev/null || true
+  json_servers_with_endpoints "$HOME/.gemini/config/mcp_config.json"
 }
 
 # Antigravity caches a directory of tool schemas per server it has actually
@@ -111,19 +173,11 @@ connected_antigravity() {
 }
 
 servers_gemini() {
-  local cfg="$HOME/.gemini/settings.json"
-  [ -f "$cfg" ] || return 0
-  python3 -c "
-import json,sys
-try: d=json.load(open('$cfg'))
-except Exception: sys.exit(0)
-for k in (d.get('mcpServers') or {}): print(k)
-" 2>/dev/null || true
+  json_servers_with_endpoints "$HOME/.gemini/settings.json"
 }
 
 servers_grok() {
-  [ -f "$HOME/.grok/config.toml" ] || return 0
-  sed -nE 's/^\[mcp_servers\.([^].]+)\]$/\1/p' "$HOME/.grok/config.toml" 2>/dev/null | sort -u || true
+  toml_servers_with_endpoints "$HOME/.grok/config.toml"
 }
 
 # --- gather ------------------------------------------------------------------
@@ -139,13 +193,79 @@ INSTALLED=()
 for a in $AGENTS; do
   command -v "$(counsel_agent_binary "$a")" &>/dev/null || continue
   INSTALLED+=("$a")
-  "servers_$a" | sed '/^$/d' | sort -u > "$TMP/$a.configured"
+  # TSV: "<raw name>\t<endpoint>"
+  "servers_$a" | sed '/^$/d' | sort -u > "$TMP/$a.tsv"
   if [ "$a" = "antigravity" ]; then
-    connected_antigravity | sed '/^$/d' | sort -u > "$TMP/$a.connected"
+    connected_antigravity | sed '/^$/d' | sort -u > "$TMP/$a.connected_names"
   else
-    cp "$TMP/$a.configured" "$TMP/$a.connected"
+    cut -f1 "$TMP/$a.tsv" > "$TMP/$a.connected_names"
   fi
 done
+
+# Canonicalise identity by ENDPOINT, not by name. The same server is routinely
+# registered under different names per agent — Grok calls the Ably MCP
+# "Ably OS", Claude reaches it as a connector, Codex calls it "ably" — all on
+# one URL. Comparing names reports phantom gaps and trains the user to ignore
+# the warning. Two entries with the same endpoint are one server; a name is
+# only the identity when no endpoint is discoverable (e.g. a claude.ai
+# connector). The shortest normalised name wins as the display id.
+python3 - "$TMP" "$SCRIPT_DIR/lib.sh" "${INSTALLED[@]:-}" <<'PY'
+import os, subprocess, sys
+
+tmp, lib = sys.argv[1], sys.argv[2]
+agents = [a for a in sys.argv[3:] if a]
+
+def normalize(name):
+    return subprocess.check_output(
+        ["bash", "-c", f'source "{lib}" && counsel_normalize_mcp_name "$1"', "_", name],
+        text=True,
+    ).strip()
+
+def norm_endpoint(ep):
+    ep = (ep or "").strip()
+    if not ep:
+        return ""
+    if "://" in ep:                       # remote: origin+path, ignore query
+        from urllib.parse import urlsplit
+        u = urlsplit(ep)
+        return f"{u.scheme}://{u.netloc}{u.path.rstrip('/')}"
+    return " ".join(ep.split())           # stdio: command + args
+
+# name -> endpoint, per agent
+per_agent = {}
+for a in agents:
+    rows = {}
+    try:
+        for line in open(os.path.join(tmp, f"{a}.tsv")):
+            if not line.strip():
+                continue
+            raw, _, ep = line.rstrip("\n").partition("\t")
+            rows[normalize(raw)] = norm_endpoint(ep)
+    except OSError:
+        pass
+    per_agent[a] = rows
+
+# endpoint -> canonical display id (shortest, then alphabetical)
+canon = {}
+for rows in per_agent.values():
+    for n, ep in rows.items():
+        if not ep:
+            continue
+        cur = canon.get(ep)
+        if cur is None or (len(n), n) < (len(cur), cur):
+            canon[ep] = n
+
+def ident(agent, name):
+    ep = per_agent[agent].get(name, "")
+    return canon.get(ep, name) if ep else name
+
+for a in agents:
+    with open(os.path.join(tmp, f"{a}.configured"), "w") as f:
+        f.write("\n".join(sorted({ident(a, n) for n in per_agent[a]})) + "\n")
+    names = [x for x in open(os.path.join(tmp, f"{a}.connected_names")).read().split("\n") if x]
+    with open(os.path.join(tmp, f"{a}.connected"), "w") as f:
+        f.write("\n".join(sorted({ident(a, normalize(n)) for n in names})) + "\n")
+PY
 
 # Reference set = servers SHARED by at least two agents (or, with a single agent
 # installed, its own set). Deliberately not the union: agents accumulate private
