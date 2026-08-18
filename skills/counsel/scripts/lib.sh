@@ -298,3 +298,42 @@ for name in configured:
         print(name)
 PY
 }
+
+# True when $1 looks like a real review, not a CLI usage dump, an echoed
+# prompt, or Antigravity failing to find REVIEW_PROMPT.md.
+# $2 is the prompt file (optional) used to detect the prompt echoed back.
+counsel_looks_like_review() {
+  local f="$1"
+  local prompt_file="${2:-}"
+  [ -s "$f" ] || return 1
+  if grep -qE '^(Usage: (claude|codex|agy|grok|gemini)|Error: Input must be provided either through stdin|unexpected argument|Skipped/failed:)' "$f"; then
+    return 1
+  fi
+  if grep -q "You.ve hit your weekly limit" "$f"; then
+    return 1
+  fi
+  # agy print-mode treats --add-dir as cwd. A missing prompt file produces a
+  # short "where is REVIEW_PROMPT.md?" reply with exit 0 and empty stderr.
+  if grep -qiE 'launched a search for[[:space:]]+REVIEW_PROMPT|requested file was not found in the current working directory' "$f"; then
+    return 1
+  fi
+  if grep -q 'REVIEW_PROMPT.md' "$f" && grep -qiE 'not found|could not (find|locate)|no such file' "$f"; then
+    local oc
+    oc=$(wc -c < "$f")
+    if [ "$oc" -lt 800 ]; then
+      return 1
+    fi
+  fi
+  if [ -n "$prompt_file" ] && [ -s "$prompt_file" ]; then
+    local first oc pc
+    first=$(head -n 1 "$prompt_file")
+    if [ ${#first} -gt 24 ] && grep -qF "$first" "$f"; then
+      oc=$(wc -c < "$f")
+      pc=$(wc -c < "$prompt_file")
+      if [ "$pc" -gt 80 ] && [ "$oc" -ge $((pc * 8 / 10)) ]; then
+        return 1
+      fi
+    fi
+  fi
+  return 0
+}

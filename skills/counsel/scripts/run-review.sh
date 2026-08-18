@@ -249,28 +249,8 @@ write_failure() {
   printf 'Skipped/failed: %s — %s\n' "$agent" "$msg" > "$output_file"
 }
 
-# True when $1 looks like a real review, not a CLI usage dump or the prompt echoed back.
 looks_like_review() {
-  local f="$1"
-  [ -s "$f" ] || return 1
-  if grep -qE '^(Usage: (claude|codex|agy|grok|gemini)|Error: Input must be provided either through stdin|unexpected argument|Skipped/failed:)' "$f"; then
-    return 1
-  fi
-  if grep -q "You.ve hit your weekly limit" "$f"; then
-    return 1
-  fi
-  if [ -s "$PROMPT_FILE" ]; then
-    local first oc pc
-    first=$(head -n 1 "$PROMPT_FILE")
-    if [ ${#first} -gt 24 ] && grep -qF "$first" "$f"; then
-      oc=$(wc -c < "$f")
-      pc=$(wc -c < "$PROMPT_FILE")
-      if [ "$pc" -gt 80 ] && [ "$oc" -ge $((pc * 8 / 10)) ]; then
-        return 1
-      fi
-    fi
-  fi
-  return 0
+  counsel_looks_like_review "$1" "$PROMPT_FILE"
 }
 
 finalize_output() {
@@ -330,25 +310,32 @@ run_agent() {
       ;;
 
     antigravity)
-      # Google Antigravity CLI (binary `agy`). Throwaway workspace + --add-dir
-      # so it can read the repo. See the strategy note in git history: do not
-      # "fix" this back to a fake HOME or workspace permission files.
-      # Prompt is handed over as a FILE inside the throwaway workspace, and the
-      # -p argument just points at it. Two earlier approaches both fail:
-      #   * `-p ""` + prompt on stdin — agy exits with
-      #     "Error: empty prompt. Usage: agy --print \"your prompt here\"".
-      #     It does not read the prompt from stdin.
-      #   * bare stdin with no -p — agy starts an INTERACTIVE session and hangs.
-      # Passing the prompt inline (`-p "$(< file)"`) works but risks ARG_MAX
-      # (1MB on macOS) on a large diff. Reading a workspace file has no limit,
-      # and reads inside the workspace are auto-allowed.
+      # Google Antigravity CLI (binary `agy`). See the strategy note in git
+      # history: do not "fix" this back to a fake HOME or workspace permission
+      # files.
+      #
+      # Confirmed 2026-08-18 (agy 1.1.14): print mode ignores the launch cwd.
+      # `--add-dir` is the workspace / tool cwd. Launching from a throwaway
+      # dir with only `--add-dir $REPO` makes agy look for ./REVIEW_PROMPT.md
+      # in the repo, miss it, and either ask the user (exit 0, empty stderr)
+      # or search until --print-timeout.
+      #
+      # Prompt delivery that does not work:
+      #   * `-p ""` + prompt on stdin — "Error: empty prompt".
+      #   * bare stdin, no -p — interactive hang.
+      #   * `-p "$(< file)"` — works, but risks ARG_MAX (1MB on macOS).
+      # Durable handoff: write the prompt into the throwaway workspace, pass
+      # that dir as the first --add-dir, name the file by absolute path in
+      # -p, and --add-dir the repo (plus any extra --add-dir) so the review
+      # can still read the tree.
       # Remote MCP often fails to connect. Still launch. Prepend connected vs
       # disconnected servers so the agent does not stall on a dead server.
       local agy_ws="$OUTPUT_DIR/.agy-ws-$agent"
       local agy_pt=$(( TIMEOUT > 30 ? TIMEOUT - 15 : TIMEOUT ))
       local agy_before="$OUTPUT_DIR/.agy-mcp-pids-$agent"
       local agy_prompt="$PROMPT_FILE"
-      local agy_connected agy_missing
+      local agy_connected agy_missing extra
+      mkdir -p "$agy_ws"
       agy_connected=$(counsel_antigravity_connected | paste -sd, -)
       agy_missing=$(counsel_antigravity_disconnected | paste -sd, -)
       if [ -n "$agy_missing" ] || [ -n "$agy_connected" ]; then
@@ -364,30 +351,37 @@ run_agent() {
           cat "$PROMPT_FILE"
         } > "$agy_prompt"
       fi
+      cp "$agy_prompt" "$agy_ws/REVIEW_PROMPT.md"
       local agy_cmd=(
         agy
-        -p "Read the file ./REVIEW_PROMPT.md in your current working directory and follow its instructions exactly. Output only what it asks for. Do not mention the file itself."
+        -p "Read the file ${agy_ws}/REVIEW_PROMPT.md and follow its instructions exactly. Output only what it asks for. Do not mention the file itself."
+        --add-dir "$agy_ws"
         --add-dir "$REPO_DIR"
         --dangerously-skip-permissions
         --disable-slash-commands
         --print-timeout "${agy_pt}s"
       )
+      for extra in "${ADD_DIRS[@]+"${ADD_DIRS[@]}"}"; do
+        agy_cmd+=(--add-dir "$extra")
+      done
       if [ -n "$AGY_MODEL" ]; then
         agy_cmd+=(--model "$AGY_MODEL")
       fi
       if [ "$DRY_RUN" -eq 1 ]; then
-        write_plan "$agent" "${agy_cmd[@]}"
+        ( cd "$agy_ws" && write_plan "$agent" "${agy_cmd[@]}" )
         echo "dry-run: would launch $agent (see ${agent}.cmd)" > "$output_file"
         [ -n "$agy_missing" ] && echo "  MCP not connected: $agy_missing (still launching)" >> "$output_file"
         return 0
       fi
-      mkdir -p "$agy_ws"
-      cp "$agy_prompt" "$agy_ws/REVIEW_PROMPT.md"
       snapshot_agy_mcp_pids > "$agy_before"
       ( cd "$agy_ws" && run_with_timeout "${agy_cmd[@]}" < /dev/null ) > "$output_file" 2> "$error_file" || rc=$?
       reap_agy_mcp_orphans "$agy_before"
       rm -f "$agy_before"
-      rm -rf "$agy_ws"
+      if looks_like_review "$output_file"; then
+        rm -rf "$agy_ws"
+      else
+        printf 'Kept throwaway workspace for inspection: %s\n' "$agy_ws" >> "$error_file"
+      fi
       ;;
 
     grok)

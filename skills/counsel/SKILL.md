@@ -1,7 +1,7 @@
 ---
 name: counsel
 description: Multi-agent review using local coding agents (Codex, Antigravity/Gemini, Grok CLI, Claude Code). Fan out review requests to multiple agents in parallel, then synthesize their findings. Use when you want a second (or third) opinion on code changes, plans, documents, or architecture decisions.
-version: 1.5.0
+version: 1.5.1
 allowed-tools: Read, Bash, Grep, Glob, Write, Task
 argument-hint: "[review topic or 'config']"
 ---
@@ -341,7 +341,7 @@ All agents run read-only:
 | Agent | Invocation | Why It's Read-Only |
 |-------|-----------|-------------------|
 | Codex | `codex exec --ignore-user-config -s read-only --output-last-message … - < prompt` | Sandbox is read-only. User MCP is stripped by default so the review finishes (`agents.codex.useUserConfig: true` to keep it). |
-| Antigravity | `agy -p "" --add-dir <repo>` from a throwaway workspace, prompt on stdin | Prompt-based restriction. Still runs when a remote MCP is down; the prompt lists connected servers. |
+| Antigravity | `agy -p "Read the file <abs>/REVIEW_PROMPT.md …" --add-dir <throwaway-ws> --add-dir <repo>` (print mode ignores launch cwd; `--add-dir` is the workspace) | Prompt-based restriction. Still runs when a remote MCP is down; the prompt lists connected servers. |
 | Grok | `grok --prompt-file … --sandbox read-only --yolo` | Kernel sandbox (read-only) plus write tools denied. `--yolo` auto-approves so a mandated MCP call cannot stall the run. |
 | Gemini *(retired)* | `gemini -p "" … < prompt` | Non-interactive, MCP disabled, no auto-approval for tool calls. |
 | Claude Code | Host: Task() / spawn_subagent. CLI: `CLAUDE_CONFIG_DIR=<chosen profile> claude -p "" --model <tier> --permission-mode auto --add-dir <repo> < prompt` | Prompt-based restriction. Profile comes from `claude.chooser`. Prompt is stdin, never `claude -p "$(< file)"`. |
@@ -354,10 +354,12 @@ real guarantee across all three is the prompt instruction plus each tool's sandb
 Treat counsel as a review tool, not a security boundary — don't point it at a
 working tree you can't afford to have touched.
 
-Antigravity *can* be hard-contained by dropping `--add-dir`: the repo then leaves the
-workspace entirely and is provably out of scope. That was rejected because it makes
-that agent's review much weaker than its peers — it would see only the prompt. If you
-want containment over comparability, remove that one flag in `run-review.sh`.
+Antigravity *can* be hard-contained by dropping the repo `--add-dir`: the repo then
+leaves the workspace entirely and is provably out of scope. The throwaway workspace
+`--add-dir` must stay — print mode treats `--add-dir` as cwd, and that is how the
+prompt file is delivered. Dropping the repo flag was rejected because it makes that
+agent's review much weaker than its peers — it would see only the prompt. If you want
+containment over comparability, remove the repo `--add-dir` in `run-review.sh`.
 
 **Why Antigravity gets `--dangerously-skip-permissions` when the others don't.** A global
 context file (`~/.gemini/GEMINI.md`) can mandate an MCP call as the agent's first action.
@@ -369,6 +371,7 @@ stalls and returns an **empty** review. Allowing tool calls is what makes the ru
 - Agent not installed: skip with message
 - Agent times out: skip with a one-line reason (5-minute default timeout). Never paste the user prompt into the review file.
 - Agent errors: one-line reason from stderr (limit / auth / unexpected argument). Continue with others.
+- Antigravity "file not found / where is REVIEW_PROMPT.md" reply (exit 0, empty stderr): failed review, not a response. The throwaway workspace is kept for inspection.
 - Antigravity MCP disconnected: still run Antigravity; note the caveat
 - No agents configured: tell user to run `/counsel config`
 - Script not found: fall back to Claude Code sub-agent only
