@@ -40,6 +40,25 @@ git rev-parse --show-toplevel >/dev/null 2>&1 || { echo "Not a git repo"; exit 1
 ROOT=$(git rev-parse --show-toplevel); cd "$ROOT"
 ```
 
+### Step 1b: Refuse repos that opt out (run before anything else)
+
+Not every git repo is a *code* repo. Some use git only as a change-tracking substrate — a notes or
+data vault with no remote, no branches and no merges — and there a worktree is pure cost: it
+duplicates the whole repo *inside* itself, and file-sync tools then replicate every copy to every
+device. A repo declares this by placing a `.no-worktrees` file at its root.
+
+```bash
+if [ -f .no-worktrees ]; then
+  echo "REFUSED — this repo opts out of worktrees:"; cat .no-worktrees; exit 1
+fi
+```
+
+**If this triggers, stop and tell the user why**, quoting the marker's contents. Do not offer to
+force past it, and do not fall back to `git worktree add` by hand — the marker is the answer. Work in
+the repo directly; if an isolated copy is genuinely needed, copy the affected files somewhere
+*outside* the repo (session scratchpad or `~/Workshop`), since it is the in-repo location that causes
+the harm.
+
 ## Step 2: Ensure repo config (idempotent — run every time)
 
 This is what makes worktrees durable for *all* creation paths, not just this skill.
