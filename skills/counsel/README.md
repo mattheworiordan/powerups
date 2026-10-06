@@ -121,3 +121,4 @@ When running from Claude Code, the Claude review uses a sub-agent (via the Task 
 - Claude CLI uses the profile chosen from your saved `claude.chooser` instruction. Pass `--exclude grok,antigravity` to skip more than one agent. `--effort extra` is "try hard".
 - Claude Code sub-agent provides the richest review (full tool access to explore beyond the diff)
 - The value comes from **diversity** — enable as many agents as you have installed
+- Grok reported as `sandbox: … /var/run/docker.sock: endpoint is a symlink`? Grok (seen with 1.0.41–1.0.46) will not start its read-only sandbox while Docker Desktop's **Allow the default Docker socket to be used** setting (Settings → Advanced) is on. Turn that setting off; do not drop `--sandbox`. Tools that hard-code `/var/run/docker.sock` then need `DOCKER_HOST=unix://$HOME/.docker/run/docker.sock`. If the symlink is still there afterwards, see Error Handling in [SKILL.md](SKILL.md).

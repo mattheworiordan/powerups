@@ -371,6 +371,9 @@ stalls and returns an **empty** review. Allowing tool calls is what makes the ru
 - Agent not installed: skip with message
 - Agent times out: skip with a one-line reason (5-minute default timeout). Never paste the user prompt into the review file.
 - Agent errors: one-line reason from stderr (limit / auth / unexpected argument). Continue with others.
+- Grok sandbox could not be applied: the file reads `Skipped/failed: grok — sandbox: <cause>`. Report it as failed: sandbox with that cause. Grok refused to start without its protections, which is the right outcome. Never rerun it without `--sandbox`. Tell the user the cause and the fix below; do not change their Docker settings or run these commands yourself.
+  - Known cause on macOS (seen with Grok 1.0.41–1.0.46): `could not resolve runtime-socket deny path /var/run/docker.sock: endpoint is a symlink`. Grok will not start its sandbox while a container runtime socket is a symlink. Docker Desktop makes that symlink when **Settings → Advanced → Allow the default Docker socket to be used** is on.
+  - Fix for the user: turn that setting off. The `docker` CLI keeps working through its `desktop-linux` context; tools that hard-code `/var/run/docker.sock` need `DOCKER_HOST=unix://$HOME/.docker/run/docker.sock`. If `/var/run/docker.sock` is still a symlink afterwards: `sudo /Applications/Docker.app/Contents/MacOS/install remove-socket-symlink-on-startup` and `sudo rm /var/run/docker.sock`.
 - Antigravity "file not found / where is REVIEW_PROMPT.md" reply (exit 0, empty stderr): failed review, not a response. The throwaway workspace is kept for inspection.
 - Antigravity MCP disconnected: still run Antigravity; note the caveat
 - No agents configured: tell user to run `/counsel config`

@@ -352,6 +352,86 @@ else
   fail "workspace left after PONG"
 fi
 
+echo "run-review.sh names the cause when an agent's sandbox fails"
+# Grok's real output (1.0.46) when Docker Desktop makes /var/run/docker.sock a
+# symlink. The cause is on the warning line; the error line only points at it.
+cat > "$FAKEBIN/grok" <<'EOF'
+#!/usr/bin/env bash
+echo "warning: sandbox could not be applied: socket deny resolution failed: could not resolve runtime-socket deny path /var/run/docker.sock: endpoint is a symlink" >&2
+echo "error: could not apply the 'read-only' sandbox profile; see the warning above for the cause. Refusing to start with its protections missing." >&2
+exit 1
+EOF
+chmod +x "$FAKEBIN/grok"
+
+OUT7="$TMP/out7"
+HOME="$FAKE" PATH="$FAKEBIN:$PATH" bash "$SCRIPT_DIR/run-review.sh" \
+  --config "$CFG" \
+  --prompt-file "$PROMPT" \
+  --output-dir "$OUT7" \
+  --agents grok \
+  --timeout 15 >"$TMP/out7.json"
+want7="Skipped/failed: grok — sandbox: socket deny resolution failed: could not resolve runtime-socket deny path /var/run/docker.sock: endpoint is a symlink"
+if [ "$(cat "$OUT7/grok.md")" = "$want7" ]; then
+  pass "sandbox failure reports 'sandbox:' and its cause"
+else
+  fail "sandbox failure: $(cat "$OUT7/grok.md")"
+fi
+if python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["agents_responded"]==0' "$TMP/out7.json"; then
+  pass "sandbox failure does not count as responded"
+else
+  fail "sandbox failure counted: $(cat "$TMP/out7.json")"
+fi
+
+# A sandbox refusal with no warning line still says it was the sandbox.
+cat > "$FAKEBIN/grok" <<'EOF'
+#!/usr/bin/env bash
+echo "error: could not apply the 'counsel-ro' sandbox profile: unknown profile" >&2
+exit 1
+EOF
+OUT8="$TMP/out8"
+HOME="$FAKE" PATH="$FAKEBIN:$PATH" bash "$SCRIPT_DIR/run-review.sh" \
+  --config "$CFG" \
+  --prompt-file "$PROMPT" \
+  --output-dir "$OUT8" \
+  --agents grok \
+  --timeout 15 >"$TMP/out8.json"
+want8="Skipped/failed: grok — sandbox: error: could not apply the 'counsel-ro' sandbox profile: unknown profile"
+if [ "$(cat "$OUT8/grok.md")" = "$want8" ]; then
+  pass "sandbox error line alone still reports 'sandbox:'"
+else
+  fail "sandbox error only: $(cat "$OUT8/grok.md")"
+fi
+if python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["agents_responded"]==0' "$TMP/out8.json"; then
+  pass "sandbox error does not count as responded"
+else
+  fail "sandbox error counted: $(cat "$TMP/out8.json")"
+fi
+
+# Codex's log holds the prompt and the commands it ran, so it can quote the
+# Grok phrases (here: reviewing this very script). Its real error must win.
+cat > "$FAKEBIN/codex" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+echo "+        line=\$(grep -E -m1 '^warning: sandbox could not be applied: ' \"\$error_file\")" >&2
+echo "warning: sandbox could not be applied: quoted from a file Codex read" >&2
+echo "ERROR: You've hit your usage limit. Try again in 3 hours." >&2
+exit 1
+EOF
+chmod +x "$FAKEBIN/codex"
+OUT9="$TMP/out9"
+HOME="$FAKE" PATH="$FAKEBIN:$PATH" bash "$SCRIPT_DIR/run-review.sh" \
+  --config "$CFG" \
+  --prompt-file "$PROMPT" \
+  --output-dir "$OUT9" \
+  --agents codex \
+  --timeout 15 >"$TMP/out9.json"
+want9="Skipped/failed: codex — ERROR: You've hit your usage limit. Try again in 3 hours."
+if [ "$(cat "$OUT9/codex.md")" = "$want9" ]; then
+  pass "sandbox phrases in another agent's log do not hide its error"
+else
+  fail "codex mislabelled: $(cat "$OUT9/codex.md")"
+fi
+
 echo "check-mcp-parity.sh"
 if [ -d "$HOME/.claude-work" ]; then
   PARITY=$(COUNSEL_CONFIG="$HOME/.config/counsel/config.json" \

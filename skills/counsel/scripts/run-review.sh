@@ -230,7 +230,23 @@ write_failure() {
     msg="timed out after ${TIMEOUT}s (no final review). Session log: ${agent}.err"
   else
     if [ -s "$error_file" ]; then
-      line=$(grep -E -m1 -i '^(error:|Error:|ERROR |You.ve hit|authentication required|unexpected argument)' "$error_file" || true)
+      line=""
+      # Grok refusing to start without its sandbox reports "sandbox: <cause>".
+      # The cause is on a warning line; the error line only says "see the
+      # warning above", which a one-line summary loses. Grok only, and exact
+      # line starts: other agents' logs hold the prompt and the commands they
+      # ran, which can quote these phrases.
+      if [ "$agent" = grok ]; then
+        line=$(grep -E -m1 '^warning: sandbox could not be applied: ' "$error_file" | sed -E 's/^warning: sandbox could not be applied: //' || true)
+        if [ -z "$line" ]; then
+          line=$(grep -E -m1 "^error: could not apply the '[^']*' sandbox profile" "$error_file" || true)
+        fi
+      fi
+      if [ -n "$line" ]; then
+        line="sandbox: $line"
+      else
+        line=$(grep -E -m1 -i '^(error:|Error:|ERROR |You.ve hit|authentication required|unexpected argument)' "$error_file" || true)
+      fi
       if [ -z "$line" ]; then
         line=$(grep -E -m1 -i 'weekly limit|rate limit|permission denied|authentication required' "$error_file" || true)
       fi
