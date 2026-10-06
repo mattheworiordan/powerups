@@ -72,8 +72,6 @@ got=$(counsel_json_get "$CFG" effort.extra.claudeModel)
 [ "$got" = "fable" ] && pass "json get effort.extra.claudeModel" || fail "json get → $got"
 
 mkdir -p "$FAKE/.gemini/config" "$FAKE/.gemini/antigravity-cli/mcp/matt-os"
-# run-review.sh reaps new orphans whose argv contains this command (pgrep -f).
-# Name one that never runs, so the tests never kill a real process.
 cat > "$FAKE/.gemini/config/mcp_config.json" <<'JSON'
 {"mcpServers":{"matt-os":{"command":"counsel-test-no-such-mcp-server"},"ably":{"url":"https://example"}}}
 JSON
@@ -441,35 +439,240 @@ else
   fail "codex mislabelled: $(cat "$OUT9/codex.md")"
 fi
 
-echo "run-review.sh finalizes when an MCP process exits mid-reap"
-# pgrep can list a process that exits before ps reads its parent. ps then
-# fails, and under set -e that ended run_agent before finalize_output: the raw
-# stub stayed in antigravity.md. This pgrep lists only itself, so every match
-# is gone by the time ps runs.
-RACEBIN="$FAKE/racebin"
-mkdir -p "$RACEBIN"
-cat > "$RACEBIN/pgrep" <<'EOF'
+echo "run-review.sh reaps the MCP servers agy leaves behind"
+# npx-shaped config: args[0] is "-y", which the old pgrep pattern turned into
+# an option, so nothing was ever reaped.
+REAPBIN="$FAKE/reapbin"
+PIDS="$FAKE/pids"
+TOKEN="counsel-test-mcp-$$-$RANDOM"
+mkdir -p "$REAPBIN" "$PIDS"
+# Every process these tests start carries $TOKEN in its argv, so cleanup can
+# check a PID is still ours before it kills it. Also on an aborted run.
+kill_test_procs() {
+  local f pid
+  for f in "$PIDS"/*.pid "$PIDS"/*.child; do
+    [ -s "$f" ] || continue
+    pid=$(cat "$f")
+    case "$(ps -o command= -p "$pid" 2>/dev/null)" in
+      *"$TOKEN"*) kill -9 "$pid" 2>/dev/null || true ;;
+    esac
+  done
+}
+trap 'kill_test_procs; rm -rf "$FAKE"' EXIT
+cat > "$FAKE/.gemini/config/mcp_config.json" <<JSON
+{"mcpServers":{"npx-server":{"command":"npx","args":["-y","$TOKEN"]}}}
+JSON
+# Stand-in server. It ignores SIGTERM like the servers that leaked, and runs
+# a child the way `npm exec` runs the real server. The child's argv names no
+# server, so only the walk from its parent reaches it.
+cat > "$REAPBIN/counsel-test-mcp" <<'EOF'
 #!/usr/bin/env bash
-echo $$
+trap '' TERM
+( exec -a "child-of-$COUNSEL_TEST_TOKEN" sleep 300 ) &
+echo $! > "$COUNSEL_TEST_PIDS/$COUNSEL_TEST_ROLE.child"
+echo $$ > "$COUNSEL_TEST_PIDS/$COUNSEL_TEST_ROLE.pid"
+wait
 EOF
-cat > "$RACEBIN/agy" <<'EOF'
+# Stand-in agy: starts its server, then exits without stopping it. Before it
+# exits it waits for the decoy, and for run-review.sh to record the server
+# and its child (in .agy-tree-antigravity next to the --add-dir workspace),
+# so the result does not depend on the poll interval.
+cat > "$REAPBIN/agy" <<'EOF'
 #!/usr/bin/env bash
-echo "I have launched a search for REVIEW_PROMPT.md across the repository to locate the file. The requested file was not found in the current working directory ($(pwd))."
-exit 0
+prev="" ws=""
+for a in "$@"; do
+  if [ "$prev" = "--add-dir" ] && [ -z "$ws" ]; then ws="$a"; fi
+  prev="$a"
+done
+record="$(dirname "$ws")/.agy-tree-antigravity"
+COUNSEL_TEST_ROLE=server counsel-test-mcp exec "$COUNSEL_TEST_TOKEN" </dev/null >/dev/null 2>&1 &
+: > "$COUNSEL_TEST_PIDS/agy-started"
+# Each stand-in server writes its .pid file last.
+for _ in $(seq 200); do
+  if [ -s "$COUNSEL_TEST_PIDS/server.pid" ] && [ -s "$COUNSEL_TEST_PIDS/decoy.pid" ] \
+    && grep -q "^$(cat "$COUNSEL_TEST_PIDS/server.pid")"$'\t' "$record" \
+    && grep -q "^$(cat "$COUNSEL_TEST_PIDS/server.child")"$'\t' "$record"; then
+    break
+  fi
+  sleep 0.05
+done
+echo PONG
 EOF
-chmod +x "$RACEBIN/pgrep" "$RACEBIN/agy"
+chmod +x "$REAPBIN/counsel-test-mcp" "$REAPBIN/agy"
+# Decoy: the same command, started during the run by something other than
+# agy, and orphaned too. Only ancestry tells it apart, and it must survive.
+(
+  for _ in $(seq 200); do
+    [ -f "$PIDS/agy-started" ] && break
+    sleep 0.05
+  done
+  ( COUNSEL_TEST_PIDS="$PIDS" COUNSEL_TEST_TOKEN="$TOKEN" COUNSEL_TEST_ROLE=decoy \
+      "$REAPBIN/counsel-test-mcp" exec "$TOKEN" </dev/null >/dev/null 2>&1 & )
+) &
 OUT10="$TMP/out10"
-HOME="$FAKE" PATH="$RACEBIN:$FAKEBIN:$PATH" bash "$SCRIPT_DIR/run-review.sh" \
+HOME="$FAKE" PATH="$REAPBIN:$FAKEBIN:$PATH" COUNSEL_TEST_PIDS="$PIDS" COUNSEL_TEST_TOKEN="$TOKEN" \
+  bash "$SCRIPT_DIR/run-review.sh" \
   --config "$CFG" \
   --prompt-file "$PROMPT" \
   --output-dir "$OUT10" \
   --agents antigravity \
   --timeout 15 >"$TMP/out10.json"
-if grep -q '^Skipped/failed: antigravity' "$OUT10/antigravity.md"; then
-  pass "an MCP process exiting mid-reap does not skip finalize"
+wait
+alive() { [ -s "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; }
+if [ -s "$PIDS/server.pid" ] && ! alive "$PIDS/server.pid" && ! alive "$PIDS/server.child"; then
+  pass "orphaned MCP server and its child are reaped"
 else
-  fail "finalize skipped: $(cat "$OUT10/antigravity.md")"
+  fail "agy's MCP server left running (server $(cat "$PIDS/server.pid" 2>/dev/null), child $(cat "$PIDS/server.child" 2>/dev/null))"
 fi
+if alive "$PIDS/decoy.pid" && alive "$PIDS/decoy.child"; then
+  pass "a matching process agy did not start is left alone"
+else
+  fail "decoy MCP server was killed"
+fi
+kill_test_procs
+
+echo "run-review.sh finalizes when a reaped process is already gone"
+# A server can exit between the ps snapshot and kill -9. The kill then fails,
+# and under set -e that would end run_agent before finalize_output: a stub
+# would stay in antigravity.md as raw text. This ps also lists a server whose
+# PID is above every pid_max (99999 on macOS, 4194304 on Linux), so it is
+# selected for reaping and the kill always fails.
+RACEBIN="$FAKE/racebin"
+mkdir -p "$RACEBIN"
+REALPS=$(command -v ps)
+cat > "$RACEBIN/ps" <<EOF
+#!/usr/bin/env bash
+"$REALPS" "\$@"
+if [ -s "\$COUNSEL_TEST_PIDS/agy.pid" ]; then
+  printf ' 99999999 %s Mon Jan  1 00:00:00 2024 counsel-test-mcp exec %s\n' \\
+    "\$(cat "\$COUNSEL_TEST_PIDS/agy.pid")" "\$COUNSEL_TEST_TOKEN"
+fi
+EOF
+cat > "$RACEBIN/agy" <<'EOF'
+#!/usr/bin/env bash
+prev="" ws=""
+for a in "$@"; do
+  if [ "$prev" = "--add-dir" ] && [ -z "$ws" ]; then ws="$a"; fi
+  prev="$a"
+done
+record="$(dirname "$ws")/.agy-tree-antigravity"
+echo $$ > "$COUNSEL_TEST_PIDS/agy.pid"
+for _ in $(seq 200); do
+  grep -q '^99999999'$'\t' "$record" 2>/dev/null && break
+  sleep 0.05
+done
+echo "I have launched a search for REVIEW_PROMPT.md across the repository to locate the file. The requested file was not found in the current working directory ($(pwd))."
+EOF
+chmod +x "$RACEBIN/ps" "$RACEBIN/agy"
+OUT11="$TMP/out11"
+HOME="$FAKE" PATH="$RACEBIN:$FAKEBIN:$PATH" COUNSEL_TEST_PIDS="$PIDS" COUNSEL_TEST_TOKEN="$TOKEN" \
+  bash "$SCRIPT_DIR/run-review.sh" \
+  --config "$CFG" \
+  --prompt-file "$PROMPT" \
+  --output-dir "$OUT11" \
+  --agents antigravity \
+  --timeout 15 >"$TMP/out11.json"
+if grep -q '^Skipped/failed: antigravity' "$OUT11/antigravity.md"; then
+  pass "a failed kill does not skip finalize"
+else
+  fail "finalize skipped: $(cat "$OUT11/antigravity.md")"
+fi
+
+echo "run-review.sh finalizes when ps fails"
+mkdir -p "$FAKE/psfail"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$FAKE/psfail/ps"
+cat > "$FAKE/psfail/agy" <<'EOF'
+#!/usr/bin/env bash
+echo "I have launched a search for REVIEW_PROMPT.md across the repository to locate the file. The requested file was not found in the current working directory ($(pwd))."
+exit 0
+EOF
+chmod +x "$FAKE/psfail/ps" "$FAKE/psfail/agy"
+OUT12="$TMP/out12"
+HOME="$FAKE" PATH="$FAKE/psfail:$FAKEBIN:$PATH" bash "$SCRIPT_DIR/run-review.sh" \
+  --config "$CFG" \
+  --prompt-file "$PROMPT" \
+  --output-dir "$OUT12" \
+  --agents antigravity \
+  --timeout 15 >"$TMP/out12.json"
+if grep -q '^Skipped/failed: antigravity' "$OUT12/antigravity.md"; then
+  pass "a failing ps does not skip finalize"
+else
+  fail "finalize skipped: $(cat "$OUT12/antigravity.md")"
+fi
+
+echo "run-review.sh never reaps agy's own helpers"
+# A filesystem server rooted at the repo is a common config. Its arg is the
+# repo path, which agy's own argv also holds (--add-dir). Only the launch
+# chain exclusion stops agy counting as a server, and so stops the walk
+# reaching a helper such as --bg-updater.
+# A server whose parent outlives agy (here, hosted by a long-lived helper) is
+# not an orphan, so it must survive too.
+CHAINBIN="$FAKE/chainbin"
+CHAINREPO="$FAKE/chain-repo"
+mkdir -p "$CHAINBIN" "$CHAINREPO"
+cat > "$FAKE/.gemini/config/mcp_config.json" <<JSON
+{"mcpServers":{"fs":{"command":"counsel-test-fs","args":["$CHAINREPO"]}}}
+JSON
+cat > "$CHAINBIN/agy-helper" <<'EOF'
+#!/usr/bin/env bash
+echo $$ > "$COUNSEL_TEST_PIDS/helper.pid"
+exec -a "agy-helper-$COUNSEL_TEST_TOKEN" sleep 300
+EOF
+cat > "$CHAINBIN/agy-host" <<'EOF'
+#!/usr/bin/env bash
+echo $$ > "$COUNSEL_TEST_PIDS/host.pid"
+counsel-test-fs "$COUNSEL_TEST_REPO" "$COUNSEL_TEST_TOKEN" </dev/null >/dev/null 2>&1 &
+wait
+EOF
+# Keeps its argv (no exec), so it names the fs server for the whole run.
+cat > "$CHAINBIN/counsel-test-fs" <<'EOF'
+#!/usr/bin/env bash
+( exec -a "child-of-$2" sleep 300 ) &
+echo $! > "$COUNSEL_TEST_PIDS/hosted.child"
+echo $$ > "$COUNSEL_TEST_PIDS/hosted.pid"
+wait
+EOF
+cat > "$CHAINBIN/agy" <<'EOF'
+#!/usr/bin/env bash
+prev="" ws=""
+for a in "$@"; do
+  if [ "$prev" = "--add-dir" ] && [ -z "$ws" ]; then ws="$a"; fi
+  prev="$a"
+done
+record="$(dirname "$ws")/.agy-tree-antigravity"
+agy-helper --bg-updater </dev/null >/dev/null 2>&1 &
+agy-host "$COUNSEL_TEST_TOKEN" </dev/null >/dev/null 2>&1 &
+for _ in $(seq 200); do
+  if [ -s "$COUNSEL_TEST_PIDS/helper.pid" ] && [ -s "$COUNSEL_TEST_PIDS/hosted.pid" ] \
+    && grep -q "^$(cat "$COUNSEL_TEST_PIDS/helper.pid")"$'\t' "$record" \
+    && grep -q "^$(cat "$COUNSEL_TEST_PIDS/hosted.pid")"$'\t' "$record"; then
+    break
+  fi
+  sleep 0.05
+done
+echo PONG
+EOF
+chmod +x "$CHAINBIN/agy-helper" "$CHAINBIN/agy-host" "$CHAINBIN/counsel-test-fs" "$CHAINBIN/agy"
+OUT13="$TMP/out13"
+( cd "$CHAINREPO" && HOME="$FAKE" PATH="$CHAINBIN:$FAKEBIN:$PATH" COUNSEL_TEST_PIDS="$PIDS" COUNSEL_TEST_TOKEN="$TOKEN" \
+  COUNSEL_TEST_REPO="$CHAINREPO" \
+  bash "$SCRIPT_DIR/run-review.sh" \
+  --config "$CFG" \
+  --prompt-file "$PROMPT" \
+  --output-dir "$OUT13" \
+  --agents antigravity \
+  --timeout 15 >"$TMP/out13.json" )
+if alive "$PIDS/helper.pid"; then
+  pass "agy's helper survives a server arg that agy's argv also holds"
+else
+  fail "agy's helper was killed"
+fi
+if alive "$PIDS/hosted.pid"; then
+  pass "a server whose parent is still running is left alone"
+else
+  fail "a server hosted by a running parent was killed"
+fi
+kill_test_procs
 
 echo "check-mcp-parity.sh"
 if [ -d "$HOME/.claude-work" ]; then

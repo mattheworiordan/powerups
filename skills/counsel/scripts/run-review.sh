@@ -168,43 +168,137 @@ run_with_timeout() {
   fi
 }
 
-# Print a pgrep pattern for each configured stdio MCP server.
-agy_mcp_patterns() {
-  local cfg="$HOME/.gemini/config/mcp_config.json"
-  [ -f "$cfg" ] || return 0
-  python3 -c "
-import json,sys
-try: d=json.load(open('$cfg'))
-except Exception: sys.exit(0)
-for s in (d.get('mcpServers') or {}).values():
-    if not s.get('command'): continue
-    args = s.get('args') or []
-    print(args[0] if args else s['command'])
-" 2>/dev/null || true
+# agy can leave its stdio MCP servers running after it exits (seen on 1.1.x),
+# and they pile up until agy's own /mcp reload fails. Matching their command
+# lines across the whole machine missed `npx -y pkg` (pattern "-y") and could
+# hit another tool's processes, so find them by ancestry: record agy's process
+# tree while it runs, then reap only what this run started.
+#
+#   agy_tree watch ROOT_PID RECORD
+#     Append ROOT's descendants to RECORD ("pid start ppid command") until
+#     ROOT is gone.
+#   agy_tree orphans RECORD CONFIG WORKSPACE
+#     Print the PIDs to reap: each recorded process whose command names a
+#     stdio server in CONFIG and whose recorded parent has exited, plus its
+#     recorded descendants, if still running. Commands holding WORKSPACE are
+#     our own launch chain (timeout, agy) and never count as servers, so the
+#     walk cannot pass through agy to its own helpers such as --bg-updater.
+#     A helper whose own command names a server still counts as one.
+agy_tree() {
+  python3 - "$@" <<'PY' 2>/dev/null || true
+import json, os, subprocess, sys, time
+
+def table():
+    """pid -> (ppid, start, command). Start time tells a reused PID apart."""
+    try:
+        # -ww: procps cuts the command to $COLUMNS even into a pipe.
+        out = subprocess.run(["ps", "-ww", "-A", "-o", "pid=,ppid=,lstart=,command="],
+                             capture_output=True, text=True,
+                             env=dict(os.environ, LC_ALL="C")).stdout
+    except Exception:
+        return {}
+    rows = {}
+    for line in out.splitlines():
+        f = line.split(None, 7)
+        if len(f) < 7 or not f[0].isdigit() or not f[1].isdigit():
+            continue
+        rows[int(f[0])] = (int(f[1]), " ".join(f[2:7]), f[7] if len(f) > 7 else "")
+    return rows
+
+def watch(root, record):
+    seen, root_start = set(), None
+    with open(record, "a") as out:
+        while True:
+            rows = table()
+            if root not in rows:
+                return
+            # A new start time means ROOT's PID now belongs to another process.
+            if root_start is None:
+                root_start = rows[root][1]
+            elif rows[root][1] != root_start:
+                return
+            kids = {}
+            for pid, (ppid, _, _) in rows.items():
+                kids.setdefault(ppid, []).append(pid)
+            # Linux ps reads /proc one process at a time, so a snapshot can
+            # hold a parent loop; visit each PID once.
+            todo, tree, found = [root], [], {root}
+            while todo:
+                for kid in kids.get(todo.pop(), []):
+                    if kid not in found:
+                        found.add(kid)
+                        tree.append(kid)
+                        todo.append(kid)
+            for pid in tree:
+                ppid, start, cmd = rows[pid]
+                if (pid, start, cmd) not in seen:
+                    seen.add((pid, start, cmd))
+                    out.write(f"{pid}\t{start}\t{ppid}\t{cmd}\n")
+            out.flush()
+            time.sleep(0.5)
+
+def orphans(record, config, workspace):
+    names = set()
+    try:
+        servers = (json.load(open(config)).get("mcpServers") or {}).values()
+    except Exception:
+        servers = []
+    for s in servers:
+        if not isinstance(s, dict) or not s.get("command"):
+            continue
+        names.add(os.path.basename(str(s["command"])))
+        for arg in s.get("args") or []:
+            # Flags such as -y say nothing about which server this is.
+            names.update(t for t in str(arg).split() if not t.startswith("-"))
+    procs = {}
+    with open(record) as f:
+        for line in f:
+            p = line.rstrip("\n").split("\t", 3)
+            if len(p) == 4 and p[0].isdigit() and p[2].isdigit():
+                procs.setdefault((int(p[0]), p[1]), [int(p[2]), set()])[1].add(p[3])
+    now = table()
+    def running(key):
+        return key[0] in now and now[key[0]][1] == key[1]
+    def is_server(key):
+        cmds = procs[key][1] | ({now[key[0]][2]} if running(key) else set())
+        if any(workspace in cmd for cmd in cmds):
+            return False
+        return any(t in names or os.path.basename(t) in names
+                   for cmd in cmds for t in cmd.split())
+    kids = {}
+    for key, (ppid, _) in procs.items():
+        kids.setdefault(ppid, []).append(key)
+    # A server whose parent is gone, even one that has exited itself: a
+    # wrapper such as `npm exec` can die and leave the real server running.
+    todo = [key for key, (ppid, _) in procs.items()
+            if is_server(key) and not any(running(p) for p in procs if p[0] == ppid)]
+    seen, reap = set(), []
+    while todo:
+        key = todo.pop()
+        if key in seen:
+            continue
+        seen.add(key)
+        if running(key):
+            reap.append(key[0])
+        todo.extend(kids.get(key[0], []))
+    for pid in sorted(reap):
+        print(pid)
+
+if sys.argv[1] == "watch":
+    watch(int(sys.argv[2]), sys.argv[3])
+elif sys.argv[1] == "orphans":
+    orphans(sys.argv[2], sys.argv[3], sys.argv[4])
+PY
 }
 
-snapshot_agy_mcp_pids() {
-  local pat
-  while IFS= read -r pat; do
-    [ -n "$pat" ] && pgrep -f "$pat" 2>/dev/null || true
-  done < <(agy_mcp_patterns) | sort -u
-}
-
-# $1 = file holding the pre-run PID snapshot
+# SIGKILL: at least some MCP servers ignore SIGTERM.
+# $1 = record written by `agy_tree watch`, $2 = this run's agy workspace
 reap_agy_mcp_orphans() {
-  local before="$1" pat pid ppid
-  [ -f "$before" ] || return 0
-  while IFS= read -r pat; do
-    [ -n "$pat" ] || continue
-    for pid in $(pgrep -f "$pat" 2>/dev/null || true); do
-      grep -qx "$pid" "$before" && continue
-      # A match can exit before ps reads it. That one needs no reaping, and
-      # under set -e the failed ps would end run_agent before finalize_output.
-      ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ') || continue
-      [ "$ppid" = "1" ] || continue
-      kill -9 "$pid" 2>/dev/null || true
-    done
-  done < <(agy_mcp_patterns)
+  local record="$1" workspace="$2" pid
+  [ -s "$record" ] || return 0
+  for pid in $(agy_tree orphans "$record" "$HOME/.gemini/config/mcp_config.json" "$workspace"); do
+    kill -9 "$pid" 2>/dev/null || true
+  done
 }
 
 write_plan() {
@@ -350,9 +444,9 @@ run_agent() {
       # disconnected servers so the agent does not stall on a dead server.
       local agy_ws="$OUTPUT_DIR/.agy-ws-$agent"
       local agy_pt=$(( TIMEOUT > 30 ? TIMEOUT - 15 : TIMEOUT ))
-      local agy_before="$OUTPUT_DIR/.agy-mcp-pids-$agent"
+      local agy_record="$OUTPUT_DIR/.agy-tree-$agent"
       local agy_prompt="$PROMPT_FILE"
-      local agy_connected agy_missing extra
+      local agy_connected agy_missing extra agy_pid watch_pid
       mkdir -p "$agy_ws"
       agy_connected=$(counsel_antigravity_connected | paste -sd, -)
       agy_missing=$(counsel_antigravity_disconnected | paste -sd, -)
@@ -391,10 +485,17 @@ run_agent() {
         [ -n "$agy_missing" ] && echo "  MCP not connected: $agy_missing (still launching)" >> "$output_file"
         return 0
       fi
-      snapshot_agy_mcp_pids > "$agy_before"
-      ( cd "$agy_ws" && run_with_timeout "${agy_cmd[@]}" < /dev/null ) > "$output_file" 2> "$error_file" || rc=$?
-      reap_agy_mcp_orphans "$agy_before"
-      rm -f "$agy_before"
+      : > "$agy_record"
+      ( cd "$agy_ws" && run_with_timeout "${agy_cmd[@]}" < /dev/null ) > "$output_file" 2> "$error_file" &
+      agy_pid=$!
+      # Own stdio: if run-review.sh is killed, the watcher must not hold the
+      # caller's pipe open until agy exits.
+      agy_tree watch "$agy_pid" "$agy_record" </dev/null >/dev/null 2>&1 &
+      watch_pid=$!
+      wait "$agy_pid" || rc=$?
+      wait "$watch_pid" 2>/dev/null || true
+      reap_agy_mcp_orphans "$agy_record" "$agy_ws"
+      rm -f "$agy_record"
       if looks_like_review "$output_file"; then
         rm -rf "$agy_ws"
       else
