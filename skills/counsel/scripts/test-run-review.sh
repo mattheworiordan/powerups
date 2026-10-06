@@ -30,8 +30,15 @@ trap 'rm -rf "$FAKE"' EXIT
 mkdir -p "$FAKE/.claude-work" "$FAKE/.claude-personal" "$FAKE/.claude"
 echo '{}' > "$FAKE/.claude-work/.claude.json"
 echo '{}' > "$FAKE/.claude-personal/.claude.json"
-got=$(HOME="$FAKE" counsel_claude_config_dir)
+# The Claude desktop app exports CLAUDE_CONFIG_DIR, which outranks ~/.claude.
+got=$(unset CLAUDE_CONFIG_DIR; HOME="$FAKE" counsel_claude_config_dir)
 [ "$got" = "$FAKE/.claude" ] && pass "no auto-pick of work profile" || fail "default dir → $got"
+got=$(CLAUDE_CONFIG_DIR="$FAKE/.claude-personal" HOME="$FAKE" counsel_claude_config_dir)
+if [ "$got" = "$FAKE/.claude-personal" ]; then
+  pass "env CLAUDE_CONFIG_DIR is honoured"
+else
+  fail "env dir → $got"
+fi
 
 CFG="$FAKE/config.json"
 cat > "$CFG" <<'JSON'
