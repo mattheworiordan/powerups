@@ -72,8 +72,10 @@ got=$(counsel_json_get "$CFG" effort.extra.claudeModel)
 [ "$got" = "fable" ] && pass "json get effort.extra.claudeModel" || fail "json get → $got"
 
 mkdir -p "$FAKE/.gemini/config" "$FAKE/.gemini/antigravity-cli/mcp/matt-os"
+# run-review.sh reaps new orphans whose argv contains this command (pgrep -f).
+# Name one that never runs, so the tests never kill a real process.
 cat > "$FAKE/.gemini/config/mcp_config.json" <<'JSON'
-{"mcpServers":{"matt-os":{"command":"x"},"ably":{"url":"https://example"}}}
+{"mcpServers":{"matt-os":{"command":"counsel-test-no-such-mcp-server"},"ably":{"url":"https://example"}}}
 JSON
 got=$(HOME="$FAKE" counsel_antigravity_disconnected | tr '\n' ',')
 [ "$got" = "ably," ] && pass "agy disconnected lists ably" || fail "agy disconnected → $got"
@@ -437,6 +439,36 @@ if [ "$(cat "$OUT9/codex.md")" = "$want9" ]; then
   pass "sandbox phrases in another agent's log do not hide its error"
 else
   fail "codex mislabelled: $(cat "$OUT9/codex.md")"
+fi
+
+echo "run-review.sh finalizes when an MCP process exits mid-reap"
+# pgrep can list a process that exits before ps reads its parent. ps then
+# fails, and under set -e that ended run_agent before finalize_output: the raw
+# stub stayed in antigravity.md. This pgrep lists only itself, so every match
+# is gone by the time ps runs.
+RACEBIN="$FAKE/racebin"
+mkdir -p "$RACEBIN"
+cat > "$RACEBIN/pgrep" <<'EOF'
+#!/usr/bin/env bash
+echo $$
+EOF
+cat > "$RACEBIN/agy" <<'EOF'
+#!/usr/bin/env bash
+echo "I have launched a search for REVIEW_PROMPT.md across the repository to locate the file. The requested file was not found in the current working directory ($(pwd))."
+exit 0
+EOF
+chmod +x "$RACEBIN/pgrep" "$RACEBIN/agy"
+OUT10="$TMP/out10"
+HOME="$FAKE" PATH="$RACEBIN:$FAKEBIN:$PATH" bash "$SCRIPT_DIR/run-review.sh" \
+  --config "$CFG" \
+  --prompt-file "$PROMPT" \
+  --output-dir "$OUT10" \
+  --agents antigravity \
+  --timeout 15 >"$TMP/out10.json"
+if grep -q '^Skipped/failed: antigravity' "$OUT10/antigravity.md"; then
+  pass "an MCP process exiting mid-reap does not skip finalize"
+else
+  fail "finalize skipped: $(cat "$OUT10/antigravity.md")"
 fi
 
 echo "check-mcp-parity.sh"

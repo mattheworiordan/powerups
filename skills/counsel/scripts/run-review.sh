@@ -198,7 +198,9 @@ reap_agy_mcp_orphans() {
     [ -n "$pat" ] || continue
     for pid in $(pgrep -f "$pat" 2>/dev/null || true); do
       grep -qx "$pid" "$before" && continue
-      ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+      # A match can exit before ps reads it. That one needs no reaping, and
+      # under set -e the failed ps would end run_agent before finalize_output.
+      ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ') || continue
       [ "$ppid" = "1" ] || continue
       kill -9 "$pid" 2>/dev/null || true
     done
