@@ -3,6 +3,7 @@
 
 counsel_agent_binary() {
   case "$1" in
+    claude) python3 -c 'import os,pwd; print(pwd.getpwuid(os.getuid()).pw_dir + "/.local/bin/claude")' ;;
     antigravity) echo "agy" ;;
     *)           echo "$1" ;;
   esac
@@ -13,7 +14,7 @@ counsel_expand_path() {
   local p="$1"
   case "$p" in
     "~")   echo "$HOME" ;;
-    "~/"*) echo "${HOME}/${p#~/}" ;;
+    \~/*) echo "${HOME}/${p#\~/}" ;;
     *)     echo "$p" ;;
   esac
 }
@@ -216,7 +217,7 @@ PY
 counsel_claude_config_dir() {
   local config_file="${1:-}"
   local override="${2:-}"
-  local from_config="" resolved=""
+  local from_config=""
 
   if [ -n "$override" ]; then
     counsel_claude_profile_dir "$override" "$config_file"
@@ -252,7 +253,8 @@ counsel_claude_json() {
   fi
 }
 
-# Configured Antigravity MCP servers that have no connection cache.
+# Legacy helper names: schema cache inventory, not verified live connectivity.
+# Configured Antigravity MCP servers without cached schemas.
 counsel_antigravity_disconnected() {
   python3 <<'PY'
 import json, os
@@ -277,6 +279,7 @@ for name in configured:
 PY
 }
 
+# Configured Antigravity MCP servers with cached schemas.
 counsel_antigravity_connected() {
   python3 <<'PY'
 import json, os
@@ -306,7 +309,7 @@ counsel_looks_like_review() {
   local f="$1"
   local prompt_file="${2:-}"
   [ -s "$f" ] || return 1
-  if grep -qE '^(Usage: (claude|codex|agy|grok|gemini)|Error: Input must be provided either through stdin|unexpected argument|Skipped/failed:)' "$f"; then
+  if grep -qE '^(Usage: (claude|codex|agy|grok)|Error: Input must be provided either through stdin|unexpected argument|Skipped/failed:)' "$f"; then
     return 1
   fi
   if grep -q "You.ve hit your weekly limit" "$f"; then
@@ -336,4 +339,27 @@ counsel_looks_like_review() {
     fi
   fi
   return 0
+}
+
+# A single caller ships with counsel and is also used by matt-os local agents.
+counsel_agent_caller() {
+  printf '%s/agent-call.py\n' "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+}
+
+# Local calls use the original personal profile, independent of a host's env.
+# Explicit/legacy choices remain visible; the caller refuses non-personal dirs.
+counsel_local_claude_config_dir() {
+  local config_file="${1:-}" override="${2:-}" spec=""
+  if [ -n "$override" ]; then
+    counsel_claude_profile_dir "$override" "$config_file"
+    return
+  fi
+  spec=$(counsel_json_get "$config_file" agents.claude.configDir)
+  [ -z "$spec" ] && spec=$(counsel_json_get "$config_file" agents.claude.config_dir)
+  [ -z "$spec" ] && spec=$(counsel_json_get "$config_file" agents.claude.profile)
+  if [ -n "$spec" ]; then
+    counsel_claude_profile_dir "$spec" "$config_file"
+  else
+    python3 -c 'import os,pwd; print(pwd.getpwuid(os.getuid()).pw_dir + "/.claude-personal")'
+  fi
 }

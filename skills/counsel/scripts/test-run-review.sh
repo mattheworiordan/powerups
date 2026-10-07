@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Offline checks for counsel launch helpers. No live agent calls.
+# shellcheck disable=SC2015
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -131,30 +132,35 @@ bash "$SCRIPT_DIR/run-review.sh" \
   --output-dir "$OUT" \
   --exclude grok \
   --effort extra \
-  --claude-config-dir work \
+  --claude-config-dir "$(python3 -c 'import os,pwd; print(pwd.getpwuid(os.getuid()).pw_dir + "/.claude-personal")')" \
   --add-dir /tmp \
   --dry-run >/tmp/counsel-dry-run.json
 
-if [ -f "$OUT/claude.cmd" ]; then
-  grep -q 'claude-work' "$OUT/claude.cmd" && pass "claude.cmd uses chosen work dir" || fail "claude.cmd dir"
-  grep -q -- '--model fable' "$OUT/claude.cmd" && pass "extra effort → fable" || fail "extra model"
-  grep -q 'stdin=prompt-file' "$OUT/claude.cmd" && pass "claude.cmd stdin" || fail "claude.cmd stdin"
-  if grep -q '\$(' "$OUT/claude.cmd"; then
-    fail "claude.cmd still interpolates prompt with \$("
-  else
-    pass "claude.cmd does not use \$(< file)"
-  fi
-else
-  fail "claude.cmd not written"
-fi
-
-if [ -f "$OUT/codex.cmd" ]; then
-  grep -q -- '--output-last-message' "$OUT/codex.cmd" && pass "codex.cmd last-message" || fail "codex.cmd last-message"
-  grep -q -- '--ignore-user-config' "$OUT/codex.cmd" && pass "codex.cmd ignore-user-config" || fail "codex.cmd ignore-user-config"
-  grep -q 'model_reasoning_effort=\\"xhigh\\"' "$OUT/codex.cmd" || grep -q 'model_reasoning_effort="xhigh"' "$OUT/codex.cmd" && pass "extra effort → codex xhigh" || fail "codex effort: $(cat "$OUT/codex.cmd")"
-else
-  fail "codex.cmd not written"
-fi
+python3 - "$OUT" <<'PYTEST'
+import json,os,pwd,sys
+from pathlib import Path
+out=Path(sys.argv[1])
+claude=json.loads((out/"claude.cmd").read_text())
+a=claude["argv"]
+assert claude["env"]["CLAUDE_CONFIG_DIR"] == pwd.getpwuid(os.getuid()).pw_dir + "/.claude-personal", claude
+assert a[a.index("--model")+1] == "fable", a
+assert claude["stdin"] == "prompt-file", claude
+assert "--safe-mode" in a and "--verbose" in a and "--disable-slash-commands" in a, a
+assert a[a.index("--tools")+1] == "Read,Glob,Grep,WebSearch,WebFetch", a
+assert a[a.index("--mcp-config")+1] == '{"mcpServers":{}}', a
+assert "--bare" not in a and "" not in a, a
+print("  ok  Claude plans personal safe-mode, explicit read tools and stdin")
+codex=json.loads((out/"codex.cmd").read_text())
+a=codex["argv"]
+assert "--output-last-message" in a and "--ignore-user-config" in a, a
+assert 'model_reasoning_effort="xhigh"' in a, a
+assert a[a.index("--sandbox")+1] == "read-only", a
+assert a[-1] == "-", a
+print("  ok  Codex plans final-message, ignored config, xhigh and read-only")
+summary=json.loads(Path("/tmp/counsel-dry-run.json").read_text())
+assert summary["agents_responded"] == 0 and summary["reviews"] == [], summary
+print("  ok  dry-run plans are not counted as agent responses")
+PYTEST
 
 if [ -f "$OUT/grok.cmd" ] || [ -f "$OUT/grok.md" ]; then
   fail "grok should be excluded"
@@ -185,28 +191,21 @@ if [ -f "$OUT3/antigravity.cmd" ] || { [ -f "$OUT3/antigravity.md" ] && grep -q 
 else
   fail "antigravity should launch: $(ls -la "$OUT3" 2>/dev/null; cat "$OUT3/antigravity.md" 2>/dev/null)"
 fi
-if [ -f "$OUT3/antigravity.md" ] && grep -q 'MCP not connected' "$OUT3/antigravity.md"; then
-  pass "antigravity dry-run notes disconnected MCP"
-else
-  fail "antigravity missing MCP caveat"
-fi
-
-if [ -f "$OUT3/antigravity.cmd" ]; then
-  grep -q -- "--add-dir $OUT3/.agy-ws-antigravity" "$OUT3/antigravity.cmd" \
-    && pass "agy first --add-dir is throwaway workspace" \
-    || fail "agy workspace add-dir: $(cat "$OUT3/antigravity.cmd")"
-  grep -q -- "-p Read\\ the\\ file\\ $OUT3/.agy-ws-antigravity/REVIEW_PROMPT.md" "$OUT3/antigravity.cmd" \
-    || grep -q "REVIEW_PROMPT.md" "$OUT3/antigravity.cmd" \
-    && pass "agy -p names REVIEW_PROMPT.md by absolute path" \
-    || fail "agy -p path: $(cat "$OUT3/antigravity.cmd")"
-  if grep -q 'current working directory' "$OUT3/antigravity.cmd"; then
-    fail "agy -p still depends on launch cwd"
-  else
-    pass "agy -p does not mention launch cwd"
-  fi
-else
-  fail "antigravity.cmd missing for path checks"
-fi
+python3 - "$OUT3/antigravity.cmd" <<'PYTEST'
+import json,sys
+from pathlib import Path
+plan=json.loads(Path(sys.argv[1]).read_text())
+a=plan["argv"]
+workspace=Path(sys.argv[1]).parent/"antigravity.call/workspace"
+assert a[a.index("--add-dir")+1] == str(workspace), a
+assert str(workspace/"REVIEW_PROMPT.md") in a[a.index("-p")+1], a
+assert "current working directory" not in a[a.index("-p")+1], a
+assert a[a.index("--output-format")+1] == "stream-json", a
+assert plan["mcp_cache"]["uncached"] == ["ably"], plan
+assert plan["mcp_cache"]["cached"] == ["matt-os"], plan
+assert not workspace.exists(), workspace
+print("  ok  agy plans prompt handoff, native stream and cache hints without creating a workspace")
+PYTEST
 
 OUT4="$TMP/out4"
 bash "$SCRIPT_DIR/run-review.sh" \
@@ -216,11 +215,13 @@ bash "$SCRIPT_DIR/run-review.sh" \
   --agents antigravity \
   --add-dir /tmp \
   --dry-run >/dev/null
-if [ -f "$OUT4/antigravity.cmd" ] && grep -q -- '--add-dir /tmp' "$OUT4/antigravity.cmd"; then
-  pass "agy forwards extra --add-dir"
-else
-  fail "agy missing extra --add-dir: $(cat "$OUT4/antigravity.cmd" 2>/dev/null)"
-fi
+python3 - "$OUT4/antigravity.cmd" <<'PYTEST'
+import json,sys
+from pathlib import Path
+a=json.loads(Path(sys.argv[1]).read_text())["argv"]
+assert any(a[i:i+2] == ["--add-dir",str(Path("/tmp").resolve())] for i in range(len(a)-1)), a
+print("  ok  agy forwards extra --add-dir")
+PYTEST
 
 echo "looks_like_review"
 STUB="$TMP/agy-stub.md"
@@ -288,7 +289,7 @@ if python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["agents
 else
   fail "stub counted as responded: $(cat "$TMP/out5.json")"
 fi
-if [ -d "$OUT5/.agy-ws-antigravity" ]; then
+if [ -d "$OUT5/antigravity.call/workspace" ]; then
   pass "failed run keeps throwaway workspace"
 else
   fail "workspace deleted after stub"
@@ -323,11 +324,11 @@ for word in $ptext; do
   esac
 done
 if [ -n "$abs" ]; then
-  echo PONG
+  printf '%s\n' '{"event":"result","result":{"status":"SUCCESS","response":"PONG"}}'
   exit 0
 fi
 if [ -f ./REVIEW_PROMPT.md ]; then
-  echo PONG
+  printf '%s\n' '{"event":"result","result":{"status":"SUCCESS","response":"PONG"}}'
   exit 0
 fi
 echo "I have launched a search for REVIEW_PROMPT.md across the repository to locate the file. The requested file was not found in the current working directory ($(pwd))."
@@ -353,7 +354,7 @@ if python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["agents
 else
   fail "PONG not counted: $(cat "$TMP/out6.json")"
 fi
-if [ ! -d "$OUT6/.agy-ws-antigravity" ]; then
+if [ ! -d "$OUT6/antigravity.call/workspace" ]; then
   pass "successful run deletes throwaway workspace"
 else
   fail "workspace left after PONG"
@@ -496,7 +497,7 @@ for _ in $(seq 200); do
   fi
   sleep 0.05
 done
-echo PONG
+printf '%s\n' '{"event":"result","result":{"status":"SUCCESS","response":"PONG"}}'
 EOF
 chmod +x "$REAPBIN/counsel-test-mcp" "$REAPBIN/agy"
 # Decoy: the same command, started during the run by something other than
@@ -650,7 +651,7 @@ for _ in $(seq 200); do
   fi
   sleep 0.05
 done
-echo PONG
+printf '%s\n' '{"event":"result","result":{"status":"SUCCESS","response":"PONG"}}'
 EOF
 chmod +x "$CHAINBIN/agy-helper" "$CHAINBIN/agy-host" "$CHAINBIN/counsel-test-fs" "$CHAINBIN/agy"
 OUT13="$TMP/out13"
@@ -674,16 +675,97 @@ else
 fi
 kill_test_procs
 
+echo "removed Gemini entries cannot launch"
+cat > "$FAKEBIN/gemini" <<'EOF'
+#!/usr/bin/env bash
+echo "legacy Gemini must not run" >&2
+exit 99
+EOF
+chmod +x "$FAKEBIN/gemini"
+LEGACY_CFG="$TMP/legacy.json"
+printf '%s\n' '{"agents":{"gemini":{"enabled":true}}}' > "$LEGACY_CFG"
+PATH="$FAKEBIN:$PATH" bash "$SCRIPT_DIR/run-review.sh" --config "$LEGACY_CFG" \
+  --prompt-file "$PROMPT" --output-dir "$TMP/legacy-out" > "$TMP/legacy-result.json"
+python3 - "$TMP/legacy-result.json" <<'PYTEST'
+import json,sys
+from pathlib import Path
+d=json.loads(Path(sys.argv[1]).read_text())
+assert d["agents_requested"] == 0 and d["agents_responded"] == 0, d
+assert not (Path(d["output_dir"])/"gemini.md").exists(), d
+print("  ok  persisted legacy entries are ignored without invoking Gemini")
+PYTEST
+
+echo "run-review.sh rejects typed failures and preserves successful app comments"
+for scenario in error nonzero partial success; do
+  cat > "$FAKEBIN/grok" <<'EOF'
+#!/usr/bin/env python3
+import json, os, sys
+scenario=os.environ["COUNSEL_TEST_SCENARIO"]
+if scenario == "partial":
+    print(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text":"partial review"}]}}))
+else:
+    print(json.dumps({"type":"result","is_error":scenario == "error",
+                      "result":"Not logged in" if scenario == "error" else "## Summary\nThe app contains a not logged in comment. No issues."}))
+if scenario == "nonzero":
+    sys.exit(7)
+EOF
+  chmod +x "$FAKEBIN/grok"
+  SCENARIO_OUT="$TMP/typed-$scenario"
+  COUNSEL_TEST_SCENARIO="$scenario" PATH="$FAKEBIN:$PATH" bash "$SCRIPT_DIR/run-review.sh" \
+    --config "$CFG" --prompt-file "$PROMPT" --output-dir "$SCENARIO_OUT" \
+    --agents grok --timeout 15 > "$TMP/typed-$scenario.json"
+  python3 - "$scenario" "$SCENARIO_OUT" "$TMP/typed-$scenario.json" <<'PYTEST'
+import json,sys
+from pathlib import Path
+scenario=sys.argv[1]
+out=Path(sys.argv[2])
+summary=json.loads(Path(sys.argv[3]).read_text())
+result=json.loads((out/"grok.call/result.json").read_text())
+assert summary["agents_responded"] == (1 if scenario == "success" else 0), summary
+assert result["status"] == {"error":"authentication_error","nonzero":"process_error",
+                            "partial":"protocol_error","success":"ok"}[scenario], result
+assert (out/"grok.call/stdout.jsonl").is_file()
+assert (out/"grok.call/answer.md").exists() == (scenario == "success")
+print("  ok  typed outcome:", scenario)
+PYTEST
+done
+
+SETUP_LOCAL=$(HOME="$FAKE" bash "$SCRIPT_DIR/detect-setup.sh" --local-caller --config "$CFG")
+echo "$SETUP_LOCAL" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+assert d["claude_profiles"]["detected"] == [], d
+assert d["claude_profiles"]["configured"] == [], d
+assert d["claude_profiles"]["needs_setup"] is False, d
+assert d["effort"]["configured"] is True, d
+print("  ok  local setup checks effort without reading account profiles")
+'
+
+LOCAL_AGENTS=$(HOME="$FAKE" bash "$SCRIPT_DIR/detect-agents.sh" --local-caller)
+echo "$LOCAL_AGENTS" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+claude=d.get("claude") or {}
+assert "profiles" not in claude, claude
+assert set(d) == {"claude","codex","grok","antigravity"}, d
+if claude.get("installed"):
+    assert claude["path"].endswith("/.local/bin/claude"), claude
+print("  ok  local detection omits account inventories and resolves the Claude executable")
+'
+
 echo "check-mcp-parity.sh"
-if [ -d "$HOME/.claude-work" ]; then
-  PARITY=$(COUNSEL_CONFIG="$HOME/.config/counsel/config.json" \
-    CLAUDE_CONFIG_DIR_OVERRIDE=work \
-    bash "$SCRIPT_DIR/check-mcp-parity.sh")
-  echo "$PARITY" | python3 -c '
+# Hermetic fixture: this test must never inspect a real account profile.
+cat > "$FAKE/.claude-personal/.claude.json" <<'JSON'
+{"claudeAiMcpEverConnected":["claude.ai Ably MCP (Slim Mode)"]}
+JSON
+PARITY=$(HOME="$FAKE" COUNSEL_CONFIG="$CFG" \
+  CLAUDE_CONFIG_DIR_OVERRIDE=personal \
+  bash "$SCRIPT_DIR/check-mcp-parity.sh")
+echo "$PARITY" | python3 -c '
 import json,sys
 d=json.load(sys.stdin)
 cl = d.get("claude_launch") or {}
-assert cl.get("profile") == "work", cl
+assert cl.get("profile") == "personal", cl
 claude = (d.get("agents") or {}).get("claude") or {}
 connected = set(claude.get("connected") or [])
 warn = d.get("warnings") or []
@@ -696,10 +778,6 @@ if any("antigravity" in w for w in opt):
     assert not any("skip" in w.lower() and "will skip" in w.lower() for w in opt)
     print("  ok  antigravity disconnect is optional, not a skip")
 '
-else
-  echo "  skip live parity checks (no ~/.claude-work)"
-fi
-
 echo
 if [ "$FAILS" -eq 0 ]; then
   echo "All counsel launch checks passed."

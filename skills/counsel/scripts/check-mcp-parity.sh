@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Compare which MCP servers each installed agent can reach.
+# Compare installed agents' MCP configuration and cached schema inventories.
 #
 # WHY: counsel's value is independent agents reaching the SAME conclusion about
 # the same material. If one agent silently lacks an MCP server the others have,
@@ -10,12 +10,13 @@
 # configured and compares them. It hardcodes no server names, so it works for
 # anyone's setup, not just the author's.
 #
-# Claude: reads the profile run-review.sh will launch (override via
+# Claude: reads the selected profile's configuration inventory (override via
 # CLAUDE_CONFIG_DIR_OVERRIDE or config). Connector display names are
 # slugified so they compare with other agents' short ids.
 #
-# Antigravity: remote MCP often fails to connect. That is an optional
-# warning. The agent still runs; the review prompt lists connected servers.
+# Antigravity: cached schemas are an inventory hint, not a live connection
+# check. No agent's connectivity is verified by this script; the legacy
+# `connected` JSON field contains configuration/cache inventory only.
 #
 # Output: JSON on stdout. Non-zero exit is NOT used for disagreement — read
 # `.parity` ("ok" | "mismatch") and `.warnings`. Optional skips land in
@@ -137,7 +138,7 @@ for n in order:
 PY
 }
 
-# JSON agents (Antigravity, legacy Gemini): same "<name>\t<endpoint>" shape.
+# Antigravity JSON configuration: same "<name>\t<endpoint>" shape.
 json_servers_with_endpoints() {
   local cfg="$1"
   [ -f "$cfg" ] || return 0
@@ -164,16 +165,12 @@ servers_antigravity() {
   json_servers_with_endpoints "$HOME/.gemini/config/mcp_config.json"
 }
 
-# Antigravity caches a directory of tool schemas per server it has actually
-# CONNECTED to. A server that is configured but missing here failed to come up.
+# Antigravity caches tool schemas per server. Presence or absence of a cache
+# does not establish the current connection or authentication state.
 connected_antigravity() {
   local d="$HOME/.gemini/antigravity-cli/mcp"
   [ -d "$d" ] || return 0
   find "$d" -maxdepth 1 -mindepth 1 -type d -exec basename {} \; 2>/dev/null | sort -u || true
-}
-
-servers_gemini() {
-  json_servers_with_endpoints "$HOME/.gemini/settings.json"
 }
 
 servers_grok() {
@@ -181,7 +178,7 @@ servers_grok() {
 }
 
 # --- gather ------------------------------------------------------------------
-AGENTS="claude codex antigravity gemini grok"
+AGENTS="claude codex antigravity grok"
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 
 CLAUDE_DIR=$(counsel_claude_config_dir "$COUNSEL_CONFIG" "$CLAUDE_CONFIG_OVERRIDE")
@@ -311,17 +308,19 @@ for a in agents:
         "connected": connected,
         "missing_vs_peers": missing,
         "configured_but_not_connected": unreachable,
+        "connectivity_verified": False,
+        "inventory_source": "schema_cache" if a == "antigravity" else "configuration",
     }
     for s in unreachable:
         text = (
-            f"{a}: MCP server '{s}' is configured but did not connect — "
-            f"it likely needs authenticating (run `agy` then /mcp)."
+            f"{a}: MCP server '{s}' is configured but has no cached schemas; "
+            f"its current connection and authentication state are unknown."
             if a == "antigravity" else
             f"{a}: MCP server '{s}' is configured but did not connect."
         )
         if a == "antigravity":
             optional.append(
-                text + " Antigravity still runs; the prompt lists connected servers only."
+                text + " Antigravity still runs with a cache inventory in the prompt."
             )
         else:
             warnings.append(text)

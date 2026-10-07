@@ -4,7 +4,8 @@
 # writes the answers back to config. Self-maintaining: a new ~/.claude-*
 # dir shows up in .claude_profiles.new.
 #
-# Usage: detect-setup.sh [--config FILE]
+# Usage: detect-setup.sh [--config FILE] [--local-caller]
+# --local-caller checks effort only, without reading any account profiles.
 # Output: JSON on stdout.
 
 set -euo pipefail
@@ -13,18 +14,24 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib.sh
 . "$SCRIPT_DIR/lib.sh"
 
+LOCAL_CALLER=0
 CONFIG_FILE="${HOME}/.config/counsel/config.json"
 while [[ $# -gt 0 ]]; do
   case $1 in
+    --local-caller) LOCAL_CALLER=1; shift ;;
     --config) CONFIG_FILE="$2"; shift 2 ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
 done
 
-DETECTED=$(counsel_detected_claude_dirs)
+if [ "$LOCAL_CALLER" -eq 1 ]; then
+  DETECTED=""
+else
+  DETECTED=$(counsel_detected_claude_dirs)
+fi
 export DETECTED
 
-python3 - "$CONFIG_FILE" "$HOME" <<'PY'
+python3 - "$CONFIG_FILE" "$HOME" "$LOCAL_CALLER" <<'PY'
 import json, os, re, sys
 from pathlib import Path
 
@@ -70,7 +77,7 @@ for d in detected_dirs:
     detected.append(item)
 
 configured_profiles = []
-raw_profiles = (cfg.get("claude") or {}).get("profiles") or []
+raw_profiles = [] if sys.argv[3] == "1" else (cfg.get("claude") or {}).get("profiles") or []
 for p in raw_profiles:
     if not isinstance(p, dict):
         continue
